@@ -647,6 +647,7 @@ open class Terminal {
 
         // DCS Handler
         parser.setDcsHandler ("$q", DECRQSS (terminal: self))
+        parser.setDcsHandler ("q", SixelDcsHandler (terminal: self))
     }
     
     func cmdSet8BitControls ()

@@ -1046,6 +1046,16 @@ extension NSColor {
             blue: blue,
             alpha: alpha)
     }
+    
+    static func make (hue: CGFloat, saturation: CGFloat, brightness: CGFloat, alpha: CGFloat) -> TTColor
+    {
+        return NSColor (
+            calibratedHue: hue,
+            saturation: saturation,
+            brightness: brightness,
+            alpha: alpha)
+    }
+
 }
 
 // Default implementations for TerminalViewDelegate
