@@ -4055,14 +4055,7 @@ open class Terminal {
      * scroll-invariant update ranges.
      */
     func updateRange (_ y: Int, scrolling: Bool = false)
-    {
-#if DEBUG
-        if y == 0 && !scrolling {
-            NSLog("")
-        }
-        //NSLog("updateRange: y=\(y), scrollTop=\(buffer.scrollTop)")
-#endif
-        
+    {        
         if !scrolling {
             tdel.lineChange(source: self, y: y)
             
