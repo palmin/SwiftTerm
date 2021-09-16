@@ -9,6 +9,7 @@
 import Foundation
 
 class CharSets {
+    public static let allLocker = NSObject()
     public static var all: [UInt8:[UInt8:String]] = initAll ()
     
     // This is the "B" charset, null

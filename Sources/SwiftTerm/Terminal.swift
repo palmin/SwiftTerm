@@ -875,7 +875,12 @@ open class Terminal {
         parser.setEscHandler ("#8", { collect, flag in self.cmdScreenAlignmentPattern () })
         parser.setEscHandler (" G") { collect, flags in self.cmdSet8BitControls () }
         parser.setEscHandler (" F") { collect, flags in self.cmdSet7BitControls () }
-        for bflag in CharSets.all.keys {
+        
+        objc_sync_enter(CharSets.allLocker)
+        let keys = CharSets.all.keys
+        objc_sync_exit(CharSets.allLocker)
+
+        for bflag in keys {
             let flag = String (UnicodeScalar (bflag))
             
             parser.setEscHandler ("(" + flag, { code, f in self.selectCharset ([UInt8 (ascii: "(")] + [f]) })
@@ -2024,11 +2029,13 @@ open class Terminal {
         var ch: UInt8
         var charset: [UInt8:String]?
         
+        objc_sync_enter(CharSets.allLocker)
         if CharSets.all.keys.contains(p [1]){
             charset = CharSets.all [p [1]]!
         } else {
             charset = nil
         }
+        objc_sync_exit(CharSets.allLocker)
         
         switch p [0] {
         case UInt8 (ascii: "("):
@@ -4380,11 +4387,13 @@ open class Terminal {
     func setgLevel (_ v: UInt8)
     {
         gLevel = v
+        objc_sync_enter(CharSets.allLocker)
         if let cs = CharSets.all [v] {
             charset = cs
         } else {
             charset = nil
         }
+        objc_sync_exit(CharSets.allLocker)
     }
     
     //
@@ -4439,7 +4448,10 @@ open class Terminal {
     
     func setgCharset (_ v: UInt8, charset: [UInt8: String]?)
     {
+        objc_sync_enter(CharSets.allLocker)
         CharSets.all [v] = charset
+        objc_sync_exit(CharSets.allLocker)
+        
         if gLevel == v {
             self.charset = charset
         }
