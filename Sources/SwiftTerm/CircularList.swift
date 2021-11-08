@@ -133,7 +133,7 @@ class CircularList<T> {
         var i = count-1
         let ic = items.count
         while i >= start {
-#if DEBUG
+#if xxx_DEBUG
             print("Moving line \(i) to \(i + ic): \(array[getCyclicIndex(i)].debugDescription)")
 #endif
             array [getCyclicIndex(i + ic)] = array [getCyclicIndex(i)]
