@@ -9,11 +9,11 @@
 import Foundation
 
 public class BufferLine: CustomDebugStringConvertible {
-#if DEBUG
+#if xxx_DEBUG
     var isWrapped: Bool {
         didSet {
             if isWrapped {
-                print("Debug this")
+                print("Debug isWrapped")
             }
         }
     }
