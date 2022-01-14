@@ -1203,7 +1203,7 @@ open class Terminal {
                 } else {
                     // The line already exists (eg. the initial viewport), mark it as a
                     // wrapped line
-#if DEBUG
+#if xxx_DEBUG
                     print("wrapped from line \(buffer.y + buffer.yBase): \(buffer.lines[buffer.y + buffer.yBase].translateToString())")
 #endif
                     buffer.y += 1
