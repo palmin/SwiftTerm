@@ -4356,7 +4356,7 @@ open class Terminal {
         updateRange (buffer.scrollTop, scrolling: true)
         updateRange (buffer.scrollBottom, scrolling: true)
         
-        if !buffer.hasScrollback {
+        if true || !buffer.hasScrollback {
             informLineChangeInterval(buffer.scrollTop, buffer.scrollBottom)
         }
 
