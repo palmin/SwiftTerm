@@ -521,11 +521,11 @@ extension TerminalView {
 
                     let transform = CGAffineTransform (translationX: positions[0].x, y: 0)
                     let rect = CGRect (origin: lineOrigin, size: CGSize (width: CGFloat (cellDimension.width * CGFloat(runGlyphsCount)), height: cellDimension.height))
-                    #if os(macOS)
+#if os(macOS)
                     rect.applying(transform).fill(using: .destinationOver)
-                    #else
+#else
                     context.fill(rect.applying(transform))
-                    #endif
+#endif
                     context.restoreGState()
                 }
 
