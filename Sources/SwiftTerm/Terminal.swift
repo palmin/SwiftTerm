@@ -1927,6 +1927,7 @@ open class Terminal {
                 buffer.yBase = max (buffer.yBase - scrollBackSize, 0)
                 buffer.yDisp = max (buffer.yDisp - scrollBackSize, 0)
             }
+            informLineChangeInterval(0, rows - 1)
             break;
         default:
             break
@@ -4068,8 +4069,8 @@ open class Terminal {
             
             let effectiveY = buffer.yDisp + y
             if effectiveY >= 0 {
-#if DEBUG
-            //NSLog("updateRange: effectiveY=\(effectiveY), yDisp=\(buffer.yDisp)")
+#if xxx_DEBUG
+            NSLog("updateRange: effectiveY=\(effectiveY), yDisp=\(buffer.yDisp)")
 #endif
                 
                 if effectiveY < scrollInvariantRefreshStart {
