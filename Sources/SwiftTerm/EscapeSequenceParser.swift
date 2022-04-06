@@ -595,6 +595,9 @@ class EscapeSequenceParser {
 #endif
                     handler (pars, collect)
                 } else {
+#if xxx_DEBUG
+                    print("CSI action fallback: code=\(code)")
+#endif
                     csiHandlerFallback (pars, collect, code)
                 }
             case .param:
