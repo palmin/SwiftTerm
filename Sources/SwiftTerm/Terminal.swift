@@ -3022,20 +3022,13 @@ open class Terminal {
                 if i+1 < parCount {
                     switch pars [i+1] {
                     case 2: // RGB color
-                        // Well this is a problem, if there are 3 arguments, expect R/G/B, if there are
-                        // more than 3, skip the first that would be the colorspace
-                        if i+5 < parCount {
-                            i += 1
-                        }
                         if i+4 < parCount {
                             fg = Attribute.Color.trueColor(
                                   red: UInt8(min (pars [i+2], 255)),
                                 green: UInt8(min (pars [i+3], 255)),
                                  blue: UInt8(min (pars [i+4], 255)))
                         }
-                        // Given the historical disagreement that was caused by an ambiguous spec,
-                        // we eat all the remaining parameters.  At least until I can figure out if there
-                        i = parCount
+                        i += 4
                         break
                         
                     case 3: // CMY color - not supported
@@ -3068,20 +3061,13 @@ open class Terminal {
                     // bg color 256
                     switch pars [i+1] {
                     case 2: // RGB color
-                        // Well this is a problem, if there are 3 arguments, expect R/G/B, if there are
-                        // more than 3, skip the first that would be the colorspace
-                        if i+5 < parCount {
-                            i += 1
-                        }
                         if i+4 < parCount {
                             bg = Attribute.Color.trueColor(
                                 red:   UInt8(min (255, pars [i+2])),
                                 green: UInt8(min (255, pars [i+3])),
                                 blue:  UInt8(min (255, pars [i+4])))
                         }
-                        // Given the historical disagreement that was caused by an ambiguous spec,
-                        // we eat all the remaining parameters.  At least until I can figure out if there
-                        i = parCount
+                        i += 4
                         break
                         
                     case 3: // CMY color - not supported
