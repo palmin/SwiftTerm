@@ -72,8 +72,8 @@ extension TerminalView {
             terminal.options = terminalOptions
             terminal.setup(isReset: false)
         }
-        terminal.backgroundColor = Color.defaultBackground
-        terminal.foregroundColor = Color.defaultForeground
+        terminal.backgroundColor = TermColor.defaultBackground
+        terminal.foregroundColor = TermColor.defaultForeground
         attrStrBuffer = CircularList<NSAttributedString> (maxLength: terminal.buffer.lines.maxLength)
         attrStrBuffer.makeEmpty = makeEmptyLine
         fullBufferUpdate(terminal: terminal)
@@ -228,7 +228,7 @@ extension TerminalView {
     /// 
     /// - Parameter colors: this should be an array of 16 values that correspond to the 16 ANSI colors,
     /// if the array does not contain 16 elements, it will not do anything
-    public func installColors (_ colors: [Color])
+    public func installColors (_ colors: [TermColor])
     {
         terminal.installPalette(colors: colors)
         self.colorsChanged()
@@ -244,14 +244,14 @@ extension TerminalView {
         colorsChanged ()
     }
 
-    public func setBackgroundColor(source: Terminal, color: Color) {
+    public func setBackgroundColor(source: Terminal, color: TermColor) {
         // Can not implement this until I change the color to not be this struct
         nativeBackgroundColor = TTColor.make (color: color)
         colorsChanged()
     }
     
     public   
-    func setForegroundColor(source: Terminal, color: Color) {
+    func setForegroundColor(source: Terminal, color: TermColor) {
         nativeForegroundColor = TTColor.make (color: color)
         colorsChanged()
     }

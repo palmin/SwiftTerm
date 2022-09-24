@@ -95,7 +95,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations {
     
     // Cache for the colors in the 0..255 range
     var colors: [NSColor?] = Array(repeating: nil, count: 256)
-    var trueColors: [Attribute.Color:NSColor] = [:]
+    var trueColors: [Attribute.TermColor:NSColor] = [:]
     var transparent = TTColor.transparent ()
     
     var fontSet: FontSet
@@ -1029,14 +1029,14 @@ extension TerminalView: TerminalDelegate {
 }
 
 extension NSColor {
-    func getTerminalColor () -> Color {
+    func getTerminalColor () -> TermColor {
         guard let color = self.usingColorSpace(.deviceRGB) else {
-            return Color.defaultForeground
+            return TermColor.defaultForeground
         }
         
         var red: CGFloat = 0.0, green: CGFloat = 0.0, blue: CGFloat = 0.0, alpha: CGFloat = 1.0
         color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
-        return Color(red: UInt16(red*65535), green: UInt16(green*65535), blue: UInt16(blue*65535))
+        return TermColor(red: UInt16(red*65535), green: UInt16(green*65535), blue: UInt16(blue*65535))
     }
     func inverseColor() -> NSColor {
         guard let color = self.usingColorSpace(.deviceRGB) else {
@@ -1062,7 +1062,7 @@ extension NSColor {
             alpha: alpha)
     }
 
-    static func make (color: Color) -> NSColor
+    static func make (color: TermColor) -> NSColor
     {
         return NSColor (deviceRed: CGFloat (color.red) / 65535.0,
                         green: CGFloat (color.green) / 65535.0,

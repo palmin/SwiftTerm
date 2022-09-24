@@ -919,10 +919,10 @@ extension TerminalViewDelegate {
 }
 
 extension UIColor {
-    func getTerminalColor () -> Color {
+    func getTerminalColor () -> TermColor {
         var red: CGFloat = 0.0, green: CGFloat = 0.0, blue: CGFloat = 0.0, alpha: CGFloat = 1.0
         self.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
-        return Color(red: UInt16 (red*65535), green: UInt16(green*65535), blue: UInt16(blue*65535))
+        return TermColor(red: UInt16 (red*65535), green: UInt16(green*65535), blue: UInt16(blue*65535))
     }
 
     func inverseColor() -> UIColor {
@@ -948,7 +948,7 @@ extension UIColor {
                        alpha: alpha)
     }
     
-    static func make (color: Color) -> UIColor
+    static func make (color: TermColor) -> UIColor
     {
         UIColor (red: CGFloat (color.red) / 65535.0,
                  green: CGFloat (color.green) / 65535.0,
