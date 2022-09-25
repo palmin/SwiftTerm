@@ -2696,7 +2696,8 @@ open class Terminal {
         case [UInt8 (ascii: "\"")]:
             cmdSetConformanceLevel (pars, collect)
         default:
-            log ("Unhandled CSI \(String (cString: collect)) with pars=\(pars)")
+            ()
+            // log ("Unhandled CSI \(String (cString: collect)) with pars=\(pars)")
         }
     }
     
