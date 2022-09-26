@@ -185,7 +185,7 @@ public class LocalProcess {
         }
         
         if let (shellPid, childfd) = PseudoTerminalHelpers.fork(andExec: executable, args: shellArgs, env: env, desiredWindowSize: &size) {
-            childMonitor = DispatchSource.makeProcessSource(identifier: shellPid, eventMask: .exit, queue: dispatchQueue)
+            childMonitor = DispatchSource.makeProcessSource(settingsIdentifier: shellPid, eventMask: .exit, queue: dispatchQueue)
             if let cm = childMonitor {
                 if #available(OSX 10.12, *) {
                     cm.activate()
