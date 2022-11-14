@@ -10,6 +10,12 @@
 
 import Foundation
 
+#if TESTFLIGHT || DEBUG
+#if os(iOS)
+import Core
+#endif
+#endif
+
 /**
  * The terminal delegate is a protocol that must be implemented by a class
  * that would provide a user interface for the terminal, and it is used by the
@@ -3649,10 +3655,21 @@ open class Terminal {
     //   xterm/charproc.c - line 2012, for more information.
     //   vim responds with ^[[?0c or ^[[?1c after the terminal's response (?)
     //
-    func cmdSendDeviceAttributes (_ pars: [Int], collect: cstring)
-    {
+    func cmdSendDeviceAttributes (_ pars: [Int], collect: cstring) {
+#if xxx_TESTFLIGHT || DEBUG
+#if os(iOS)
+        CrashContext.shared.remember("cmdSendDeviceAttributes: \(pars) \(collect)")
+#endif
+#endif
+        
         if pars.count > 0 && pars [0] > 0 {
-            log ("SendDeviceAttribuets got \(pars) and \(String(cString: collect))")
+#if DEBUG
+            // make sure collect is valid null-terminated c string before
+            // logging it
+            if let last = collect.last, last == 0 {
+                log ("cmdSendDeviceAttributes got \(pars) and \(String(cString: collect))")
+            }
+#endif
             return
         }
 
