@@ -433,14 +433,14 @@ class EscapeSequenceParser {
         while i < len {
             code = data [i]
  
-#if DEBUG
+#if xxx_DEBUG
             if tmuxCommandMode && i < earliestTmux {
                 print("tmux: skipping as i = \(i)/\(len) and earliest = \(earliestTmux)")
             }
 #endif
             
            if tmuxCommandMode && earliestTmux <= i && code == 37 /* ascii code is % */{
-#if DEBUG
+#if xxx_DEBUG
                print("tmux: start = \(i): \(data.debugString(around: i))")
 #endif
                
@@ -456,7 +456,7 @@ class EscapeSequenceParser {
                    endIndex += 1
                }
                
-#if DEBUG
+#if xxx_DEBUG
                print("tmux: end = \(endIndex) \(data.debugString(from: i, to: endIndex)))")
 #endif
                let bytes = data[i...endIndex]
