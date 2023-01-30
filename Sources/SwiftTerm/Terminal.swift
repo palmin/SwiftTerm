@@ -700,12 +700,17 @@ open class Terminal {
             return []
         }
         
+        if data.hasPrefix("%alert-bell") {
+            self.tdel.bell (source: self)
+            return []
+        }
+        
         if data.hasPrefix("%exit") && data.count >= 6 {
 #if DEBUG
             print("tmux ending with command: \(data.asDebugString?.trimmed() ?? "")")
 #endif
             
-            let next = data[data.startIndex+6]
+            let next = data[data.startIndex+5]
             if next == 10 || next == 13 {
                 parser.tmuxCommandMode = false
                 return []

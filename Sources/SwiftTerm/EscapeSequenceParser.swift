@@ -403,16 +403,73 @@ class EscapeSequenceParser {
     
     private var unusedTmuxData = [UInt8]()
     
-    func parse (data inputData: ArraySlice<UInt8>) {
-        // include unused data for tmux mode
-        var data = inputData
-        if tmuxCommandMode && !unusedTmuxData.isEmpty {
-            var combined = [UInt8](inputData)
-            combined.append(contentsOf: unusedTmuxData)
-            unusedTmuxData.removeAll()
-            data = combined[0..<combined.count]
-        }
+    func parse(data allData: ArraySlice<UInt8>) {
+        var data = allData // data is the unused part of the input
         
+        while !data.isEmpty {
+            if tmuxCommandMode {
+                if !unusedTmuxData.isEmpty {
+                    data.insert(contentsOf: unusedTmuxData, at: 0)
+                    unusedTmuxData.removeAll()
+                }
+                                
+                // skip past whitespace if needed
+                var i = data.startIndex
+#if DEBUG
+                print("tmux: Looking for command at: \(data.debugString(around: i))")
+#endif
+                let end = data.endIndex
+                while i < end && isspace(Int32(data[i])) != 0 {
+                    i += 1
+                }
+                if i > data.startIndex {
+                    data = data[i...]
+                    continue
+                }
+                
+                // tmux information starts with % (ascii 37)
+                guard data[i] == 37 else {
+                    // we leave tmux command mode on parser error
+                    tmuxCommandMode = false
+                    continue
+                }
+                
+                // we need end of line to make sure we have full command
+                guard var endIndex = data[i...].firstIndex(where: { $0 == 10 || $0 == 13 }) else {
+                    // wait until we have more data
+                    unusedTmuxData = [UInt8](data)
+                    return
+                }
+                
+                // include both carriage end line feed when present
+                if endIndex + 1 < data.endIndex && data[endIndex] == 13 && data[endIndex+1] == 10 {
+                    endIndex += 1
+                }
+                    
+                // grab the next tmux command and make sire this is gone from input buffer
+                let bytes = data[i...endIndex]
+                i = endIndex + 1
+                data = data[i...]
+                
+                // use decoded data
+                if let decoded = tmuxCommandHandler(bytes), !decoded.isEmpty {
+                    let _ = parse2(data: decoded[...])
+                }
+                
+            } else {
+                let consumed = parse2(data: data)
+                if consumed >= data.count {
+                    break
+                }
+        
+                data = data.suffix(from: consumed)
+            }
+        }
+    }
+    
+    // this parses data but will stop parsing if tmux mode changes,
+    // always returning how much data it consumed
+    func parse2 (data: ArraySlice<UInt8>) -> Int {
         var code : UInt8 = 0
         var transition : UInt8 = 0
         var error = false
@@ -425,66 +482,18 @@ class EscapeSequenceParser {
         var dcsHandler = activeDcsHandler
         
         //dump (data)
+        
+        let startingTmuxMode = tmuxCommandMode
             
         // process input string
         var i = data.startIndex
-        var earliestTmux = i
-        var len = data.count
+        let len = data.count
         while i < len {
-            code = data [i]
- 
-#if xxx_DEBUG
-            if tmuxCommandMode && i < earliestTmux {
-                print("tmux: skipping as i = \(i)/\(len) and earliest = \(earliestTmux)")
+            if startingTmuxMode != tmuxCommandMode {
+                return i
             }
-#endif
             
-           if tmuxCommandMode && earliestTmux <= i && code == 37 /* ascii code is % */{
-#if xxx_DEBUG
-               print("tmux: start = \(i): \(data.debugString(around: i))")
-#endif
-               
-               // find end of line delaying parse until we have more data if needed
-               guard var endIndex = data[i...].firstIndex(where: { $0 == 10 || $0 == 13 }) else {
-                   // save everything from index i for later
-                   unusedTmuxData = [UInt8](data[i...])
-                   return
-               }
-               
-               // include both carriage end line feed when present
-               if data[endIndex] == 13 && endIndex < data.endIndex && data[endIndex+1] == 10 {
-                   endIndex += 1
-               }
-               
-#if xxx_DEBUG
-               print("tmux: end = \(endIndex) \(data.debugString(from: i, to: endIndex)))")
-#endif
-               let bytes = data[i...endIndex]
-               if let replacement = tmuxCommandHandler(bytes) {
-                   // replace this part of data and keep going
-                   var buffer = [UInt8]()
-                   buffer.append(contentsOf: replacement)
-                   earliestTmux = buffer.count
-                   buffer.append(contentsOf: data[data.index(after: endIndex)...])
-
-                   data = buffer[...]
-                   i = 0
-                   len = buffer.count
-                
-#if DEBUG
-                   print("buffer = \(data.asDebugString ?? "BIN")")
-#endif
-                   
-                   continue
-               } else {
-                  // we failed parsing tmux code and we make sure we don't keep looking at this
-                  earliestTmux = i + 1
-               }
-           }
-            
-#if xxx_DEBUG
-            print("parse: i = \(i), code = \(Character(UnicodeScalar(code))) [\(code)], currentState = \(currentState)")
-#endif
+            code = data [i]
             
             // 1f..80 are printable ascii characters
             // c2..f3 are valid utf8 beginning of sequence elements, and most importantly,
@@ -504,7 +513,7 @@ class EscapeSequenceParser {
             if currentState == .csiParam && (code > 0x2f && code < 0x39) {
                 let newV = pars [pars.count - 1] * 10 + Int(code) - 48
                 
-                // Prevent attempts at overflowing - crash 
+                // Prevent attempts at overflowing - crash
                 let willOverflow =  newV > ((Int.max/10)-10)
                 pars [pars.count - 1] = willOverflow ? 0 : newV
                 
@@ -583,7 +592,7 @@ class EscapeSequenceParser {
                     state.collect = collect
                     let inject = errorHandler (state)
                     if inject.abort {
-                        return;
+                        return len
                     }
                     error = false;
                 }
@@ -641,9 +650,6 @@ class EscapeSequenceParser {
                 } else {
                     transition = ParserState.ground.rawValue
                     dscHandlerFallback(code, pars)
-#if xxx_DEBUG
-                    print("FIXME: perhaps have a DCS fallback?")
-#endif
                 }
                 
                 break
@@ -675,10 +681,6 @@ class EscapeSequenceParser {
                 var j = i
                 while j < len {
                     let c = data [j]
-                    if c == 37 && tmuxCommandMode && j >= earliestTmux /* ASCII(%) = 37 */ {
-                        // stop at % which might need decoding
-                        break
-                    }
                     if c == ControlCodes.BEL || c == ControlCodes.CAN || c == ControlCodes.ESC {
                         break
                     } else if c >= 0x20 {
@@ -744,6 +746,7 @@ class EscapeSequenceParser {
         // save state
         
         self.currentState = currentState
+        return len
     }
     
     static func parseInt (_ str: ArraySlice<UInt8>) -> Int
