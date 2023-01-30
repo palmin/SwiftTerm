@@ -402,6 +402,7 @@ class EscapeSequenceParser {
     }
     
     private var unusedTmuxData = [UInt8]()
+    private var tmuxBlockIdentifier: Int?
     
     func parse(data allData: ArraySlice<UInt8>) {
         var data = allData // data is the unused part of the input
@@ -414,15 +415,31 @@ class EscapeSequenceParser {
                 }
                                 
                 // skip past whitespace if needed
+                func isSpace(_ ch: UInt8) -> Bool {
+                    ch == 10 || ch == 13 || ch == 32
+                }
                 var i = data.startIndex
 #if DEBUG
                 print("tmux: Looking for command at: \(data.debugString(around: i))")
 #endif
                 let end = data.endIndex
-                while i < end && isspace(Int32(data[i])) != 0 {
+                while i < end && isSpace(data[i]) {
                     i += 1
                 }
+                
+                // we jump past anything that isn't % (ascii 37) when looking for command %end/%error
+                if tmuxBlockIdentifier != nil {
+                    while i < end && data[i] != 37 {
+                        i += 1
+                    }
+                }
+                
+                // skip/process along as much data as we have
                 if i > data.startIndex {
+                    if tmuxBlockIdentifier != nil {
+                        let content = [UInt8](data[..<i])
+                        let _ = parse2(data: content[...])
+                    }
                     data = data[i...]
                     continue
                 }
@@ -430,6 +447,9 @@ class EscapeSequenceParser {
                 // tmux information starts with % (ascii 37)
                 guard data[i] == 37 else {
                     // we leave tmux command mode on parser error
+#if DEBUG
+                    print("tmux: parser error at: \(data.debugString(around: i))")
+#endif
                     tmuxCommandMode = false
                     continue
                 }
@@ -445,11 +465,38 @@ class EscapeSequenceParser {
                 if endIndex + 1 < data.endIndex && data[endIndex] == 13 && data[endIndex+1] == 10 {
                     endIndex += 1
                 }
-                    
-                // grab the next tmux command and make sire this is gone from input buffer
+                
+                // grab the next tmux command and make sure this is gone from input buffer
                 let bytes = data[i...endIndex]
                 i = endIndex + 1
                 data = data[i...]
+
+                if let identifier = tmuxBlockIdentifier {
+                    // only the correct %end/%error commands can satisfy us
+                    if bytes.hasPrefix("%end \(identifier) ") ||
+                       bytes.hasPrefix("%error \(identifier) ") {
+                        
+                        // block ended
+                        tmuxBlockIdentifier = nil
+                    } else {
+                        // block didn't end so the line is passed along
+                        let _ = parse2(data: bytes[...])
+                    }
+                    
+                    continue
+                }
+                                
+                // check if we started multiline response
+                if bytes.hasPrefix("%begin ") {
+                    let postfix = bytes.dropFirst(7)
+                    if let digitEnd = postfix.firstIndex(of: 32),
+                       let string = String(data: Data(postfix[..<digitEnd]), encoding: .utf8),
+                       let digit = Int(string) {
+                        
+                        tmuxBlockIdentifier = digit
+                        continue
+                    }
+                }
                 
                 // use decoded data
                 if let decoded = tmuxCommandHandler(bytes), !decoded.isEmpty {

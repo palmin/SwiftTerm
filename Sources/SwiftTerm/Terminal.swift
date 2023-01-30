@@ -636,8 +636,12 @@ open class Terminal {
         }
     }
     
-    public var tmuxCommandCode: Bool {
+    public var tmuxCommandMode: Bool {
         return parser.tmuxCommandMode
+    }
+    
+    public func forceTmuxCommandMode() {
+        parser.tmuxCommandMode = true
     }
     
     func tmuxHandler(_ data: ArraySlice<UInt8>) -> [UInt8]? {
