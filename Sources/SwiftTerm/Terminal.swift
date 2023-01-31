@@ -640,10 +640,6 @@ open class Terminal {
         return parser.tmuxCommandMode
     }
     
-    public func forceTmuxCommandMode() {
-        parser.tmuxCommandMode = true
-    }
-    
     func tmuxHandler(_ data: ArraySlice<UInt8>) -> [UInt8]? {
         func decode(from offset: Int) -> [UInt8] {
             var result = [UInt8]()
