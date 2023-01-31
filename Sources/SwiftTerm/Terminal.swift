@@ -680,7 +680,7 @@ open class Terminal {
             // we fix tmux escaping of escape itself
             replacement.replace("\u{1b}Ptmux;\u{1b}\u{1b}", "\u{1b}")
             
-#if DEBUG
+#if xxx_DEBUG
             print("tmux decoded \(data.asDebugString?.trimmed() ?? "") into \(replacement[...].asDebugString ?? "")")
 #endif
             return replacement
@@ -706,7 +706,7 @@ open class Terminal {
         }
         
         if data.hasPrefix("%exit") && data.count >= 6 {
-#if DEBUG
+#if xxx_DEBUG
             print("tmux ending with command: \(data.asDebugString?.trimmed() ?? "")")
 #endif
             

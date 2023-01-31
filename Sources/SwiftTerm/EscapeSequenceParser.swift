@@ -419,7 +419,7 @@ class EscapeSequenceParser {
                     ch == 10 || ch == 13 || ch == 32
                 }
                 var i = data.startIndex
-#if DEBUG
+#if xxx_DEBUG
                 print("tmux: Looking for command at: \(data.debugString(around: i))")
 #endif
                 let end = data.endIndex
