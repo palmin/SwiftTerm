@@ -88,7 +88,7 @@ class BufferSet {
     }
     
     public func resize (newColumns : Int, newRows : Int ) {
-#if DEBUG
+#if xxx_DEBUG
         print("BufferSet resize from \(normal.cols)x\(normal.rows) to \(newColumns)x\(newRows)")
 #endif
         

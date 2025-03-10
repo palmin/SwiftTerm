@@ -108,7 +108,7 @@ class Buffer {
         }
     }
     var tabStops : [Bool]
-    
+        
     /**
      * This records the saved X position
      */
@@ -264,7 +264,7 @@ class Buffer {
     }
     
     public func resize (newCols : Int, newRows : Int) {
-#if DEBUG
+#if xxx_DEBUG
         print("Resize before: y = \(y), yBase=\(yBase)")
 #endif
         
@@ -380,7 +380,7 @@ class Buffer {
                 }
             }
         }
-#if DEBUG
+#if xxx_DEBUG
         print("Resize: rows gone from \(rows) to \(newRows), y = \(y), yBase=\(yBase)")
 #endif
         rows = newRows

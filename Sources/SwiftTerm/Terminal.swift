@@ -2119,8 +2119,11 @@ open class Terminal {
     
     //
 
-    func cmdRestoreCursor (_ pars: [Int], _ collect: cstring)
-    {
+    func cmdRestoreCursor (_ pars: [Int], _ collect: cstring) {
+        if weird_Fish40_CSI_Collect(collect) {
+            return
+        }
+        
         buffer.x = buffer.savedX
         buffer.y = buffer.savedY
         curAttr = buffer.savedAttr
@@ -2616,8 +2619,7 @@ open class Terminal {
     //  ESC 7
     //   Save cursor (ANSI.SYS).
     //
-    func cmdSaveCursor (_ pars: [Int], _ collect: cstring)
-    {
+    func cmdSaveCursor (_ pars: [Int], _ collect: cstring) {
         buffer.savedX = buffer.x
         buffer.savedY = buffer.y
         buffer.savedAttr = curAttr
@@ -2890,6 +2892,23 @@ open class Terminal {
         }
     }
 
+    // we receive weird CSI like sequences from fish-4.0 that
+    // should be ignored
+    func weird_Fish40_CSI_Collect(_ collect: cstring) -> Bool {
+        guard collect.count == 1 else {
+            return false
+        }
+        
+        switch collect[0] {
+        case 61: // = as in the sequence "\e[=5u"
+            return true
+        case 62: // < as in the sequence "\e[>4;1m"
+            return true
+        default:
+            return false
+        }
+    }
+    
     //
     // CSI Pm m  Character Attributes (SGR).
     //     Ps = 0  -> Normal (default).
@@ -2959,6 +2978,11 @@ open class Terminal {
     //
     func cmdCharAttributes (_ pars: [Int], _ collect: cstring)
     {
+        // ignore \e[< escape sequences
+        if weird_Fish40_CSI_Collect(collect) {
+            return
+        }
+        
         // Optimize a single SGR0.
         if pars.count == 1 && pars [0] == 0 {
             curAttr = CharData.defaultAttr
@@ -3664,13 +3688,7 @@ open class Terminal {
     //   xterm/charproc.c - line 2012, for more information.
     //   vim responds with ^[[?0c or ^[[?1c after the terminal's response (?)
     //
-    func cmdSendDeviceAttributes (_ pars: [Int], collect: cstring) {
-#if xxx_TESTFLIGHT || DEBUG
-#if os(iOS)
-        CrashContext.shared.remember("cmdSendDeviceAttributes: \(pars) \(collect)")
-#endif
-#endif
-        
+    func cmdSendDeviceAttributes (_ pars: [Int], collect: cstring) {        
         if pars.count > 0 && pars [0] > 0 {
 #if DEBUG
             // make sure collect is valid null-terminated c string before
