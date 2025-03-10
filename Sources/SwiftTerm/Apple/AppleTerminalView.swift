@@ -167,12 +167,12 @@ extension TerminalView {
         let lineDescent = CTFontGetDescent (fontSet.normal)
         let lineLeading = CTFontGetLeading (fontSet.normal)
         let cellHeight = ceil(lineAscent + lineDescent + lineLeading)
-        #if os(macOS)
+#if os(macOS)
         let cellWidth = fontSet.normal.maximumAdvancement.width
-        #else
+#else
         let fontAttributes = [NSAttributedString.Key.font: fontSet.normal]
         let cellWidth = "W".size(withAttributes: fontAttributes).width
-        #endif
+#endif
         return CellDimension(width: cellWidth, height: cellHeight)
     }
     
