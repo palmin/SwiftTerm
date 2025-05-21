@@ -3130,6 +3130,15 @@ open class Terminal {
             case 49:
                 // reset bg
                 bg = CharData.defaultAttr.bg
+                
+            case 58:
+                // TODO: set underline color
+                ()
+                
+            case 59:
+                // TODO: default underline color
+                ()
+                
             case 90...97:
                 // fg color 16
                 p += 8
