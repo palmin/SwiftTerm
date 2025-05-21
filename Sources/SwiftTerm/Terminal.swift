@@ -4634,9 +4634,9 @@ open class Terminal {
             sendResponse(cc.CSI, "M", [UInt8(buttonFlags+32), min (UInt8(255), UInt8(32 + x+1)),
                                        min (UInt8(255), UInt8(32+y+1))])
         case .sgr:
-            let bflags : Int = ((buttonFlags & 3) == 3) ? (buttonFlags & ~3) : buttonFlags
-            let m = ((buttonFlags & 3) == 3) ? "m" : "M"
-            sendResponse(cc.CSI, "<\(bflags);\(x+1);\(y+1)\(m)")
+            let isRelease = (buttonFlags & 3) == 3 && (buttonFlags & 32) == 0
+            let finalChar = isRelease ? "m" : "M"
+            sendResponse(cc.CSI, "<\(buttonFlags);\(x + 1);\(y + 1)\(finalChar)")
         case .urxvt:
             sendResponse(cc.CSI, "\(buttonFlags+32);\(x+1);\(y+1)M");
         case .utf8:
