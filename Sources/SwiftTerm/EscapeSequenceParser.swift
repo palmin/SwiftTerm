@@ -572,7 +572,7 @@ class EscapeSequenceParser {
             transition = table [(Int(currentState.rawValue) << 8) | Int (UInt8 ((code < 0xa0 ? code : EscapeSequenceParser.NonAsciiPrintable)))]
             let action = ParserAction (rawValue: transition >> 4)!
 #if xxx_DEBUG
-            print("action = \(action)")
+            print("action = \(action), code = \(code)")
 #endif
             switch action {
             case .print:
@@ -668,7 +668,7 @@ class EscapeSequenceParser {
                 }
             case .escDispatch:
 #if xxx_DEBUG
-                    print("ESC handler: \(collect) code=\(code)")
+                print("ESC handler: \(collect) code=\(code)")
 #endif
                 if let handler = escHandlers [collect + [code]] {
                     handler (collect, code)
@@ -688,7 +688,7 @@ class EscapeSequenceParser {
                 dcs = -1
                 printStateReset()
             case .dcsHook:
-#if DEBUG
+#if xxx_DEBUG
                 print("DCS handler: \(collect) code=\(code)")
 #endif
                 if let dcs = dcsHandlers [collect + [code]] {

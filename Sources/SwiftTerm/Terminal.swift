@@ -887,7 +887,7 @@ open class Terminal {
         parser.setEscHandler ("%G", { collect, flag in self.cmdSelectDefaultCharset () })
         parser.setEscHandler ("#8", { collect, flag in self.cmdScreenAlignmentPattern () })
         parser.setEscHandler (" G") { collect, flags in self.cmdSet8BitControls () }
-        parser.setEscHandler (" F") { collect, flags in self.cmdSet7BitControls () }
+        parser.setEscHandler (" F") { collect, flags in self.cmdSet7BitControls () }        
         
         objc_sync_enter(CharSets.allLocker)
         let keys = CharSets.all.keys
@@ -4624,6 +4624,10 @@ open class Terminal {
      */
     public func sendEvent (buttonFlags: Int, x: Int, y: Int)
     {
+#if DEBUG
+        NSLog("sendEvent: buttonFlags=\(buttonFlags), x=\(x), y=\(y), protocol=\(mouseProtocol)")
+#endif
+        
         //print ("got \(mouseProtocol)")
         switch mouseProtocol {
         case .x10:
