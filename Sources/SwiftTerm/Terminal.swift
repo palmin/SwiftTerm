@@ -201,6 +201,14 @@ public protocol TerminalDelegate {
      */
     func notify(source: Terminal, _ title: String, _ body: String)
     
+    /**
+     * This method is invoked when the client application sends an ENQ (Enquiry) control code (0x05).
+     * The terminal should respond with an answerback string.
+     *
+     * The default implementation returns an empty string.
+     */
+    func enquire(source: Terminal) -> String
+    
 }
 
 /**
@@ -794,6 +802,12 @@ open class Terminal {
         parser.csiHandlers [UInt8 (ascii: "}")] = csiCloseBrace
         parser.csiHandlers [UInt8 (ascii: "~")] = cmdDeleteColumns
 
+        parser.executeHandlers [5]  = {
+            let answerback = self.tdel.enquire(source: self);
+            if !answerback.isEmpty {
+                self.sendResponse([UInt8](answerback.utf8))
+            }
+        }
         parser.executeHandlers [7]  = { self.tdel.bell (source: self) }
         parser.executeHandlers [10] = cmdLineFeed
         parser.executeHandlers [11] = cmdLineFeedBasic   // VT Vertical Tab - ignores auto-new-line behavior in ConvertEOL

@@ -10,6 +10,7 @@ import Foundation
 
 struct ControlCodes  {
     static let NUL : UInt8 = 0x00
+    static let ENQ : UInt8 = 0x05
     static let BEL : UInt8 = 0x07
     static let BS  : UInt8 = 0x08
     static let HT  : UInt8 = 0x09

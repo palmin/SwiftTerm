@@ -866,6 +866,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 }
 
 extension TerminalView: TerminalDelegate {
+    public func enquire(source: Terminal) -> String {
+        ""
+    }
+    
     open func isProcessTrusted(source: Terminal) -> Bool {
         true
     }
