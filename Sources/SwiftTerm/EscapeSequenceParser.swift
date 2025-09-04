@@ -265,7 +265,7 @@ class EscapeSequenceParser {
     
     // String with payload
     typealias OscHandler = (ArraySlice<UInt8>) -> ()
-    typealias OscHandlerFallback = (Int) -> ()
+    typealias OscHandlerFallback = (Int, ArraySlice<UInt8>) -> ()
     
     typealias DscHandlerFallback = (UInt8, [Int]) -> ()
     
@@ -329,7 +329,7 @@ class EscapeSequenceParser {
         dcsHandlers.removeAll()
         activeDcsHandler = nil
         errorHandler = { $0 }
-        oscHandlerFallback = { _ in }
+        oscHandlerFallback = { _, _ in }
         executeHandlerFallback = {}
         printHandler = { _ in }
         printStateReset = {}
@@ -372,7 +372,7 @@ class EscapeSequenceParser {
         print ("Cannot handle ESC-\(code)")
     }
     
-    var oscHandlerFallback: OscHandlerFallback = { (code: Int) -> () in
+    var oscHandlerFallback: OscHandlerFallback = { (code: Int, content: ArraySlice<UInt8>) -> () in
         
     }
     
@@ -754,7 +754,7 @@ class EscapeSequenceParser {
                     if let handler = oscHandlers [oscCode] {
                         handler (content)
                     } else {
-                        oscHandlerFallback (oscCode)
+                        oscHandlerFallback (oscCode, content)
                     }
                 }
                 if code == 0x1b {

@@ -743,7 +743,7 @@ open class Terminal {
         parser.executeHandlerFallback = {
             self.log ("Unknown EXECUTE code")
         }
-        parser.oscHandlerFallback = { (code: Int) in
+        parser.oscHandlerFallback = { (code: Int, content: ArraySlice<UInt8>) in
             self.log ("Unknown OSC code: \(code)")
         }
         parser.printHandler = handlePrint
