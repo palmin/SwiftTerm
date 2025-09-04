@@ -17,6 +17,17 @@ import Core
 #endif
 
 /**
+ * Progress state for OSC 9;4 progress reporting sequences
+ */
+public enum ProgressState: Int {
+    case hide = 0           // Hide the progress bar
+    case normal = 1         // Normal progress
+    case error = 2          // Error state (typically shown in red)
+    case indeterminate = 3  // Indeterminate/spinning progress
+    case warning = 4        // Warning state (typically shown in yellow)
+}
+
+/**
  * The terminal delegate is a protocol that must be implemented by a class
  * that would provide a user interface for the terminal, and it is used by the
  * `Terminal` to notify of important changes on the underlying terminal
@@ -200,6 +211,14 @@ public protocol TerminalDelegate {
      * The default implementation does nothing.
      */
     func notify(source: Terminal, _ title: String, _ body: String)
+    
+    /**
+     * Invoked when client application issues OSC 9;4 progress reporting sequence.
+     * Progress value is 0-100 (ignored when state is indeterminate)
+     *
+     * The default implementation does nothing.
+     */
+    func progressUpdate(source: Terminal, state: ProgressState, progress: Int)
     
     /**
      * This method is invoked when the client application sends an ENQ (Enquiry) control code (0x05).
@@ -845,6 +864,8 @@ open class Terminal {
         parser.oscHandlers [7] = oscSetCurrentDirectory
         
         parser.oscHandlers [8] = oscHyperlink
+        // 9;4 - Progress reporting (ConEmu/Windows Terminal)
+        parser.oscHandlers [9] = oscProgressReport
         //  10 - Change VT100 text foreground color to Pt.
         parser.oscHandlers [10] = oscSetTextForeground
         //  11 - Change VT100 text background color to Pt.
@@ -1536,6 +1557,27 @@ open class Terminal {
         let title = parts[1]
         let body = parts[2...].joined(separator: ";")
         tdel.notify(source: self, title, body)
+    }
+    
+    // OSC 9;4 progress reporting:
+    //    ESC ] 9 ; 4 ; <state> ; <progress> \a
+    // State: 0 = hide, 1 = normal, 2 = error, 3 = indeterminate, 4 = warning
+    // Progress: 0-100 percentage
+    func oscProgressReport(_ data: ArraySlice<UInt8>) {
+        guard let text = String(bytes: data, encoding: .utf8) else {
+            return
+        }
+        
+        let parts = text.split(separator: ";", maxSplits: 2)
+        guard parts.count == 3,
+              parts[0] == "4",  // sub-command must be 4 for progress
+              let stateValue = Int(parts[1]),
+              let state = ProgressState(rawValue: stateValue),
+              let progress = Int(parts[2]) else {
+            return
+        }
+        
+        tdel.progressUpdate(source: self, state: state, progress: progress)
     }
     
     // OSC 1337 is used by iTerm2 for imgcat and other things:
@@ -4831,6 +4873,10 @@ public extension TerminalDelegate {
     }
     
     func notify(source: Terminal, _ title: String, _ body: String) {
+        
+    }
+    
+    func progressUpdate(source: Terminal, state: ProgressState, progress: Int) {
         
     }
 
