@@ -1315,9 +1315,9 @@ open class Terminal {
     {
         let buffer = self.buffer
         let by = buffer.y
-        
+
         let canScroll = buffer.x >= buffer.marginLeft && buffer.x <= buffer.marginRight
-        
+
         if by == buffer.scrollBottom {
             if canScroll {
                 scroll(isWrapped: false)
@@ -1326,12 +1326,12 @@ open class Terminal {
         } else {
                 buffer.y = by + 1
         }
-        
+
         // If the end of the line is hit, prevent this action from wrapping around to the next line.
         if buffer.x >= cols {
             buffer.x -= 1
         }
-        
+
         // This event is emitted whenever the terminal outputs a LF or NL.
         emitLineFeed()
         if lineFeedMode {
@@ -2664,7 +2664,7 @@ open class Terminal {
     {
         var left = min (cols-1, max (0, (pars.count > 0 ? pars[0] : 1) - 1))
         let right = min (cols-1, max (0, (pars.count > 1 ? pars [1] : cols) - 1))
-        
+
         left = min (left, right)
         buffer.marginLeft = left
         buffer.marginRight = right
@@ -2708,7 +2708,7 @@ open class Terminal {
         }
         // normalize
         bottom -= 1
-        
+
         // only set the scroll region if top < bottom
         if top < bottom {
             buffer.scrollBottom = bottom
@@ -4385,7 +4385,7 @@ open class Terminal {
 #if xxx_DEBUG
         print("scroll: isWrapped = \(isWrapped)")
 #endif
-        
+
         let buffer = self.buffer
         var newLine = blankLine
         if newLine.count != cols || newLine [0].attribute != eraseAttr () {
@@ -4397,7 +4397,34 @@ open class Terminal {
         let topRow = buffer.yBase + buffer.scrollTop
         let bottomRow = buffer.yBase + buffer.scrollBottom
 
-        if buffer.scrollTop == 0 {
+        // check if we're using horizontal margins (for tmux split panes)
+        let hasHorizontalMargins = marginMode && (buffer.marginLeft > 0 || buffer.marginRight < cols - 1)
+
+        // When horizontal margins are active (e.g., tmux split panes), we need to scroll
+        // only the content within the margins, not the entire line
+        if hasHorizontalMargins {
+            // scroll cells within margins only
+            let fillData = newLine[0]
+            let marginWidth = buffer.marginRight - buffer.marginLeft + 1
+
+            // shift cells up within the margin range using array slicing
+            for row in topRow..<bottomRow {
+                let sourceLine = buffer.lines[row + 1]
+                let targetLine = buffer.lines[row]
+
+                // Use BufferLine's optimized copyFrom method with array slicing
+                targetLine.copyFrom(sourceLine,
+                                  srcCol: buffer.marginLeft,
+                                  dstCol: buffer.marginLeft,
+                                  len: marginWidth)
+            }
+
+            // clear the bottom line within margins using optimized fill
+            let bottomLine = buffer.lines[bottomRow]
+            bottomLine.fill(with: fillData,
+                          atCol: buffer.marginLeft,
+                          len: marginWidth)
+        } else if buffer.scrollTop == 0 {
             // Determine whether the buffer is going to be trimmed after insertion.
             let willBufferBeTrimmed = buffer.lines.isFull
 
@@ -4425,7 +4452,7 @@ open class Terminal {
                 if buffer.hasScrollback {
                     buffer.linesTop += 1
                 }
-                
+
                 // When the buffer is full and the user has scrolled up, keep the text
                 // stable unless ydisp is right at the top
                 if userScrolling {
