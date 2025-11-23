@@ -157,7 +157,12 @@ struct UnicodeUtil {
         if bisearch (rune: irune, table: combining, max: combining.count-1) != 0 {
             return 0
         }
-        
+
+        // treat emoji as double-width characters (like CJK)
+        if rune.properties.isEmojiPresentation {
+            return 2
+        }
+
         /* if we arrive here, ucs is not a combining or C0/C1 control character */
         return 1 +
             ((irune >= 0x1100 &&
