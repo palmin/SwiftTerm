@@ -274,7 +274,12 @@ open class Terminal {
     
     /// Controls whether it is possible to set left and right margin modes
     var marginMode: Bool = false
-    
+
+    /// Returns true if horizontal margins are active and constrain the scrollable area
+    var hasHorizontalMargins: Bool {
+        marginMode && (buffer.marginLeft > 0 || buffer.marginRight < cols - 1)
+    }
+
     /// Saved state for the origin mode
     var savedOriginMode : Bool = false
     var savedMarginMode: Bool = false
@@ -4379,7 +4384,46 @@ open class Terminal {
     }
     
     var blankLine: BufferLine = BufferLine(cols: 0)
-    
+
+    /// Scrolls content within horizontal margins only, preserving content outside the margins.
+    /// Used for tmux split panes where each pane has its own margin region.
+    /// - Parameters:
+    ///   - up: If true, content moves up (bottom line cleared). If false, content moves down (top line cleared).
+    ///   - topRow: The absolute top row of the scroll region (yBase + scrollTop)
+    ///   - bottomRow: The absolute bottom row of the scroll region (yBase + scrollBottom)
+    ///   - fillData: The character data to fill cleared cells with
+    func scrollWithinHorizontalMargins(up: Bool, topRow: Int, bottomRow: Int, fillData: CharData) {
+        let marginWidth = buffer.marginRight - buffer.marginLeft + 1
+
+        if up {
+            // content moves up: copy from row+1 to row, clear bottom
+            for row in topRow..<bottomRow {
+                let sourceLine = buffer.lines[row + 1]
+                let targetLine = buffer.lines[row]
+                targetLine.copyFrom(sourceLine,
+                                  srcCol: buffer.marginLeft,
+                                  dstCol: buffer.marginLeft,
+                                  len: marginWidth)
+            }
+            buffer.lines[bottomRow].fill(with: fillData,
+                                        atCol: buffer.marginLeft,
+                                        len: marginWidth)
+        } else {
+            // content moves down: copy from row-1 to row, clear top
+            for row in stride(from: bottomRow, to: topRow, by: -1) {
+                let sourceLine = buffer.lines[row - 1]
+                let targetLine = buffer.lines[row]
+                targetLine.copyFrom(sourceLine,
+                                  srcCol: buffer.marginLeft,
+                                  dstCol: buffer.marginLeft,
+                                  len: marginWidth)
+            }
+            buffer.lines[topRow].fill(with: fillData,
+                                     atCol: buffer.marginLeft,
+                                     len: marginWidth)
+        }
+    }
+
     public func scroll (isWrapped: Bool = false)
     {
 #if xxx_DEBUG
@@ -4397,33 +4441,9 @@ open class Terminal {
         let topRow = buffer.yBase + buffer.scrollTop
         let bottomRow = buffer.yBase + buffer.scrollBottom
 
-        // check if we're using horizontal margins (for tmux split panes)
-        let hasHorizontalMargins = marginMode && (buffer.marginLeft > 0 || buffer.marginRight < cols - 1)
-
-        // When horizontal margins are active (e.g., tmux split panes), we need to scroll
-        // only the content within the margins, not the entire line
         if hasHorizontalMargins {
-            // scroll cells within margins only
-            let fillData = newLine[0]
-            let marginWidth = buffer.marginRight - buffer.marginLeft + 1
-
-            // shift cells up within the margin range using array slicing
-            for row in topRow..<bottomRow {
-                let sourceLine = buffer.lines[row + 1]
-                let targetLine = buffer.lines[row]
-
-                // Use BufferLine's optimized copyFrom method with array slicing
-                targetLine.copyFrom(sourceLine,
-                                  srcCol: buffer.marginLeft,
-                                  dstCol: buffer.marginLeft,
-                                  len: marginWidth)
-            }
-
-            // clear the bottom line within margins using optimized fill
-            let bottomLine = buffer.lines[bottomRow]
-            bottomLine.fill(with: fillData,
-                          atCol: buffer.marginLeft,
-                          len: marginWidth)
+            // scroll within margins only, preserving content outside (for tmux split panes)
+            scrollWithinHorizontalMargins(up: true, topRow: topRow, bottomRow: bottomRow, fillData: newLine[0])
         } else if buffer.scrollTop == 0 {
             // Determine whether the buffer is going to be trimmed after insertion.
             let willBufferBeTrimmed = buffer.lines.isFull
@@ -4773,9 +4793,18 @@ open class Terminal {
             // possibly move the code below to term.reverseScroll()
             // test: echo -ne '\e[1;1H\e[44m\eM\e[0m'
             // blankLine(true) is xterm/linux behavior
-            let scrollRegionHeight = buffer.scrollBottom - buffer.scrollTop
-            buffer.lines.shiftElements (start: buffer.y + buffer.yBase, count: scrollRegionHeight, offset: 1)
-            buffer.lines [buffer.y + buffer.yBase] = buffer.getBlankLine (attribute: eraseAttr ())
+            let topRow = buffer.y + buffer.yBase
+            let bottomRow = buffer.scrollBottom + buffer.yBase
+
+            if hasHorizontalMargins {
+                // reverse scroll within margins only, preserving content outside (for tmux split panes)
+                let fillData = CharData(attribute: eraseAttr(), char: " ")
+                scrollWithinHorizontalMargins(up: false, topRow: topRow, bottomRow: bottomRow, fillData: fillData)
+            } else {
+                let scrollRegionHeight = buffer.scrollBottom - buffer.scrollTop
+                buffer.lines.shiftElements (start: topRow, count: scrollRegionHeight, offset: 1)
+                buffer.lines [topRow] = buffer.getBlankLine (attribute: eraseAttr ())
+            }
             updateRange (buffer.scrollTop)
             updateRange (buffer.scrollBottom)
             informLineChangeInterval(buffer.scrollTop, buffer.scrollBottom)
