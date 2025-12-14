@@ -954,6 +954,9 @@ open class Terminal {
         // DCS Handler
         parser.setDcsHandler ("$q", DECRQSS (terminal: self))
         parser.setDcsHandler ("q", SixelDcsHandler (terminal: self))
+
+        // APC Handler for Kitty graphics protocol
+        parser.setApcHandler ("G", KittyGraphicsHandler (terminal: self))
         parser.dscHandlerFallback = { [weak parser] code, parameters in
 #if DEBUG || TESTFLIGHT
             let todo = "remember to enable tmux command mode for all"
@@ -993,6 +996,34 @@ open class Terminal {
     }
 
     public var anyImages = false
+
+    // MARK: - Kitty Graphics Protocol Storage
+
+    /// Storage for Kitty graphics protocol images, keyed by image ID
+    private var kittyImages: [UInt32: TTImage] = [:]
+
+    /// Store an image for later retrieval by the Kitty graphics protocol
+    func storeKittyImage(id: UInt32, image: TTImage) {
+        kittyImages[id] = image
+    }
+
+    /// Retrieve a stored Kitty image by ID
+    func getKittyImage(id: UInt32) -> TTImage? {
+        return kittyImages[id]
+    }
+
+    /// Delete a stored Kitty image by ID
+    func deleteKittyImage(id: UInt32) {
+        kittyImages.removeValue(forKey: id)
+    }
+
+    /// Delete all stored Kitty images
+    func deleteAllKittyImages() {
+        kittyImages.removeAll()
+    }
+
+    // MARK: - Image Display
+
     func image (_ image: ImageCell) {
         guard let token = TinyAtom.lookup (value: image) else {
             return

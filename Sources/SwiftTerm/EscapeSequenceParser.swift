@@ -31,6 +31,7 @@ enum ParserState : UInt8 {
     case dcsIgnore
     case dcsIntermediate
     case dcsPassthrough
+    case apcString
 }
 
 typealias cstring = [UInt8]
@@ -76,32 +77,36 @@ enum ParserAction : UInt8 {
     case dcsHook
     case dcsPut
     case dcsUnhook
+    case apcStart
+    case apcPut
+    case apcEnd
 }
 
 class TransitionTable {
     // data is packed like this:
-    // currentState << 8 | characterCode  -->  action << 4 | nextState
-    var table: [UInt8]
-    
+    // currentState << 8 | characterCode  -->  action << 8 | nextState
+    // Changed from UInt8 to UInt16 to support more than 16 actions
+    var table: [UInt16]
+
     init (len: Int)
     {
         table = Array.init (repeating: 0, count: len)
     }
-    
+
     func add (code: UInt8, state: ParserState, action: ParserAction, next: ParserState)
     {
-        let v = (UInt8 (action.rawValue) << 4) | next.rawValue
+        let v = (UInt16(action.rawValue) << 8) | UInt16(next.rawValue)
         table [(Int (state.rawValue) << 8) | Int(code)] = v
     }
-    
+
     func add (codes: [UInt8], state: ParserState, action: ParserAction, next: ParserState)
     {
         for c in codes {
             add (code: c, state: state, action: action, next: next)
         }
     }
-    
-    subscript (idx: Int) -> UInt8 {
+
+    subscript (idx: Int) -> UInt16 {
         get {
             return table [idx]
         }
@@ -111,6 +116,15 @@ class TransitionTable {
 protocol  DcsHandler {
     func hook (collect: cstring, parameters: [Int],  flag: UInt8)
     func put (data : ArraySlice<UInt8>)
+    func unhook ()
+}
+
+/// Handler for APC (Application Program Command) sequences
+/// Format: ESC _ <identifier> <data> ST
+/// Used by protocols like Kitty graphics (ESC _ G ... ST)
+protocol ApcHandler {
+    func hook ()
+    func put (data: ArraySlice<UInt8>)
     func unhook ()
 }
 
@@ -163,10 +177,15 @@ class EscapeSequenceParser {
             table.add (code: 0x9c, state: state, action: .ignore, next: .ground) // ST as terminator
             table.add (code: 0x1b, state: state, action: .clear, next: .escape)  // ESC
             table.add (code: 0x9d, state: state, action: .oscStart, next: .oscString)  // OSC
-            table.add (codes: [0x98, 0x9e, 0x9f], state: state, action: .ignore, next: .sosPmApcString)
+            table.add (codes: [0x98, 0x9e], state: state, action: .ignore, next: .sosPmApcString) // SOS, PM
+            table.add (code: 0x9f, state: state, action: .apcStart, next: .apcString)  // APC (8-bit)
             table.add (code: 0x9b, state: state, action: .clear, next: .csiEntry)  // CSI
             table.add (code: 0x90, state: state, action: .clear, next: .dcsEntry)  // DCS
         }
+        // global rules for apcString state
+        table.add (codes: [0x18, 0x1a, 0x99, 0x9a], state: .apcString, action: .execute, next: .ground)
+        table.add (code: 0x9c, state: .apcString, action: .apcEnd, next: .ground) // ST terminates APC
+        table.add (code: 0x1b, state: .apcString, action: .apcEnd, next: .escape)  // ESC can start ST
         // rules for executable and 0x7f
         table.add (codes: executables, state: .ground, action: .execute, next: .ground)
         table.add (codes: executables, state: .escape, action: .execute, next: .escape)
@@ -187,12 +206,28 @@ class EscapeSequenceParser {
         table.add (code: 0x7f, state: .oscString, action: .oscPut, next: .oscString)
         table.add (codes: [0x9c, 0x1b, 0x18, 0x1a, 0x07], state: .oscString, action: .oscEnd, next: .ground)
         table.add (codes: r (low: 0x1c, high: 0x20), state: .oscString, action: .ignore, next: .oscString)
-        // sos/pm/apc does nothing
-        table.add (codes: [0x58, 0x5e, 0x5f], state: .escape, action: .ignore, next: .sosPmApcString)
+        // sos/pm does nothing (SOS=X, PM=^)
+        table.add (codes: [0x58, 0x5e], state: .escape, action: .ignore, next: .sosPmApcString)
         table.add (codes: printables, state: .sosPmApcString, action: .ignore, next: .sosPmApcString)
         table.add (codes: executables, state: .sosPmApcString, action: .ignore, next: .sosPmApcString)
         table.add (code: 0x9c, state: .sosPmApcString, action: .ignore, next: .ground)
         table.add (code: 0x7f, state: .sosPmApcString, action: .ignore, next: .sosPmApcString)
+        // apc (ESC _ = 0x5f) - used by Kitty graphics protocol
+        table.add (code: 0x5f, state: .escape, action: .apcStart, next: .apcString)
+        table.add (codes: printables, state: .apcString, action: .apcPut, next: .apcString)
+        table.add (codes: executables, state: .apcString, action: .ignore, next: .apcString)
+        table.add (code: 0x7f, state: .apcString, action: .apcPut, next: .apcString)
+#if DEBUG
+        // verify APC table entries
+        let testCode: UInt8 = 71 // 'G'
+        let apcStateRaw = ParserState.apcString.rawValue
+        let idx = (Int(apcStateRaw) << 8) | Int(testCode)
+        let entry = table[idx]
+        let entryAction = ParserAction(rawValue: UInt8(entry >> 8))!
+        let entryNext = ParserState(rawValue: UInt8(entry & 0xFF))!
+        print("[KittyGraphics] Table check: apcString.rawValue=\(apcStateRaw), idx=\(idx), entry=\(entry), action=\(entryAction), next=\(entryNext)")
+        print("[KittyGraphics] Expected: action=apcPut(\(ParserAction.apcPut.rawValue)), next=apcString(\(ParserState.apcString.rawValue))")
+#endif
         // csi entries
         table.add (code: 0x5b, state: .escape, action: .clear, next: .csiEntry)
         table.add (codes: r (low: 0x40, high: 0x7f), state: .csiEntry, action: .csiDispatch, next: .ground)
@@ -285,6 +320,8 @@ class EscapeSequenceParser {
     var escHandlers: [cstring:EscHandler] = [:]
     var dcsHandlers: [cstring:DcsHandler] = [:]
     var activeDcsHandler: DcsHandler? = nil
+    var apcHandlers: [UInt8:ApcHandler] = [:]
+    var activeApcHandler: ApcHandler? = nil
     var errorHandler: (ParsingState) -> ParsingState = { (state : ParsingState) -> ParsingState in return state; }
     
     var initialState: ParserState = .ground
@@ -302,6 +339,7 @@ class EscapeSequenceParser {
     
     // buffers over several calls
     var _osc: cstring
+    var _apc: cstring
     var _pars: [Int]
     var _collect: cstring
     var printHandler: PrintHandler = { (slice : ArraySlice<UInt8>) -> () in }
@@ -313,6 +351,7 @@ class EscapeSequenceParser {
     {
         table = EscapeSequenceParser.buildVt500TransitionTable()
         _osc = []
+        _apc = []
         _pars = [0]
         _collect = []
         // "\"
@@ -328,6 +367,8 @@ class EscapeSequenceParser {
         escHandlers.removeAll()
         dcsHandlers.removeAll()
         activeDcsHandler = nil
+        apcHandlers.removeAll()
+        activeApcHandler = nil
         errorHandler = { $0 }
         oscHandlerFallback = { _, _ in }
         executeHandlerFallback = {}
@@ -358,7 +399,14 @@ class EscapeSequenceParser {
     {
         dcsHandlers [Array (flag.utf8)] = callback
     }
-    
+
+    /// Register an APC handler for a specific identifier character
+    /// For Kitty graphics, this would be "G"
+    func setApcHandler (_ identifier: String, _ callback: ApcHandler)
+    {
+        apcHandlers [identifier.first!.asciiValue!] = callback
+    }
+
     var dscHandlerFallback: DscHandlerFallback = { code, pars in }
     
     // TmuxCommandHandler return value is what should replace the input
@@ -380,9 +428,11 @@ class EscapeSequenceParser {
     {
         currentState = initialState
         _osc = []
+        _apc = []
         _pars = [0]
         _collect = []
         activeDcsHandler = nil
+        activeApcHandler = nil
         printStateReset()
     }
 
@@ -524,9 +574,11 @@ class EscapeSequenceParser {
         var printVal = -1
         var dcs = -1
         var osc = self._osc
+        var apc = self._apc
         var collect = self._collect
         var pars = self._pars
         var dcsHandler = activeDcsHandler
+        var apcHandler = activeApcHandler
         
         //dump (data)
         
@@ -569,10 +621,13 @@ class EscapeSequenceParser {
             }
             
             // Normal transition and action loop
-            transition = table [(Int(currentState.rawValue) << 8) | Int (UInt8 ((code < 0xa0 ? code : EscapeSequenceParser.NonAsciiPrintable)))]
-            let action = ParserAction (rawValue: transition >> 4)!
-#if xxx_DEBUG
-            print("action = \(action), code = \(code)")
+            let transitionValue = table [(Int(currentState.rawValue) << 8) | Int (UInt8 ((code < 0xa0 ? code : EscapeSequenceParser.NonAsciiPrintable)))]
+            transition = UInt8(transitionValue & 0xFF) // next state in lower 8 bits
+            let action = ParserAction (rawValue: UInt8(transitionValue >> 8))!
+#if DEBUG
+            if currentState == .apcString || action == .apcStart || action == .apcPut || action == .apcEnd {
+                print("[KittyGraphics] state=\(currentState) code=\(code) ('\(code >= 0x20 && code < 0x7f ? String(Character(UnicodeScalar(code))) : "?")') -> action=\(action) next=\(ParserState(rawValue: transition)!)")
+            }
 #endif
             switch action {
             case .print:
@@ -743,7 +798,7 @@ class EscapeSequenceParser {
                     var oscCode : Int
                     var content : ArraySlice<UInt8>
                     let semiColonAscii = 59 // ';'
-                    
+
                     if let idx = osc.firstIndex (of: UInt8(semiColonAscii)){
                         oscCode = EscapeSequenceParser.parseInt (osc [0..<idx])
                         content = osc [(idx+1)...]
@@ -765,8 +820,94 @@ class EscapeSequenceParser {
                 collect = []
                 dcs = -1
                 printStateReset()
+            case .apcStart:
+                // APC sequence starting (ESC _ or 0x9f)
+#if DEBUG
+                print("[KittyGraphics] APC apcStart")
+#endif
+                if ~printVal != 0 {
+                    printHandler (data[printVal..<i])
+                    printVal = -1
+                }
+                apc = []
+                apcHandler = nil
+            case .apcPut:
+                // accumulate APC data
+                // on first character, try to find a handler
+                if apc.isEmpty && apcHandler == nil {
+#if DEBUG
+                    print("[KittyGraphics] APC apcPut first char=\(code) ('\(Character(UnicodeScalar(code)))')")
+#endif
+                    if let handler = apcHandlers[code] {
+#if DEBUG
+                        print("[KittyGraphics] APC found handler for '\(Character(UnicodeScalar(code)))'")
+#endif
+                        apcHandler = handler
+                        apcHandler?.hook()
+                    } else {
+#if DEBUG
+                        print("[KittyGraphics] APC no handler for '\(Character(UnicodeScalar(code)))' (available: \(apcHandlers.keys.map { Character(UnicodeScalar($0)) }))")
+#endif
+                    }
+                    apc.append(code)
+                } else {
+                    // fast path: accumulate multiple bytes at once
+                    var j = i
+                    while j < len {
+                        let c = data[j]
+                        if c == ControlCodes.ESC || c == 0x9c {
+                            break
+                        } else if c >= 0x20 || c == 0x7f {
+                            apc.append(c)
+                        }
+                        j += 1
+                    }
+                    i = j - 1
+#if DEBUG
+                    print("[KittyGraphics] APC apcPut accumulated \(apc.count) bytes")
+#endif
+                }
+            case .apcEnd:
+                // APC sequence ended (ESC \ or ST)
+#if DEBUG
+                print("[KittyGraphics] APC apcEnd - apc.count=\(apc.count), handler=\(apcHandler != nil)")
+#endif
+                if !apc.isEmpty && code != ControlCodes.CAN && code != ControlCodes.SUB {
+                    if let handler = apcHandler {
+#if DEBUG
+                        print("[KittyGraphics] APC handler type: \(type(of: handler))")
+                        let dataSlice = apc[1...]
+                        print("[KittyGraphics] APC data to pass: \(String(bytes: dataSlice.prefix(50), encoding: .utf8) ?? "non-utf8")")
+#endif
+                        // pass remaining data (excluding the first identifier byte)
+                        if apc.count > 1 {
+#if DEBUG
+                            print("[KittyGraphics] APC calling handler.put with \(apc.count - 1) bytes")
+#endif
+                            handler.put(data: apc[1...])
+#if DEBUG
+                            print("[KittyGraphics] APC handler.put returned")
+#endif
+                        }
+#if DEBUG
+                        print("[KittyGraphics] APC calling handler.unhook")
+#endif
+                        handler.unhook()
+#if DEBUG
+                        print("[KittyGraphics] APC handler.unhook returned")
+#endif
+                    }
+                }
+                if code == 0x1b {
+                    transition |= ParserState.escape.rawValue
+                }
+                apc = []
+                apcHandler = nil
+                pars = [0]
+                collect = []
+                printStateReset()
             }
-            currentState = ParserState (rawValue: transition & 15)!
+            currentState = ParserState (rawValue: transition)!
             i += 1
         }
         // push leftover pushable buffers to terminal
@@ -784,14 +925,15 @@ class EscapeSequenceParser {
         
         // save non pushable buffers
         _osc = osc
+        _apc = apc
         _collect = collect
         _pars = pars
-        
-        // save active dcs handler reference
+
+        // save active handler references
         activeDcsHandler = dcsHandler
-        
+        activeApcHandler = apcHandler
+
         // save state
-        
         self.currentState = currentState
         return len
     }
