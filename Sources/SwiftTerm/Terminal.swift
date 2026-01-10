@@ -1186,8 +1186,10 @@ open class Terminal {
             }
 
             if let firstScalar = ch.unicodeScalars.first {
-                // If this is a Unicode combining character
-                if firstScalar.properties.canonicalCombiningClass != .notReordered {
+                // If this is a Unicode combining character or a variation selector
+                let isVariationSelector = (firstScalar.value >= 0xFE00 && firstScalar.value <= 0xFE0F) ||
+                                          (firstScalar.value >= 0xE0100 && firstScalar.value <= 0xE01EF)
+                if firstScalar.properties.canonicalCombiningClass != .notReordered || isVariationSelector {
                     // Determine if the last time we poked at a character is still valid
                     if let last = lastBufferStorage {
                         if last.buffer === buffers.active && last.cols == cols && last.rows == rows {
