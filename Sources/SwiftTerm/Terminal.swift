@@ -105,7 +105,12 @@ public protocol TerminalDelegate {
     /// This method is invoked when the buffer changes from Normal to Alternate, or Alternate to Normal
     /// The default implementation does nothing.
     func bufferActivated (source: Terminal)
-    
+
+    /// This method is invoked when synchronized output mode (mode 2026) is enabled or disabled.
+    /// When enabled, the terminal should defer screen updates until the mode is disabled.
+    /// The default implementation does nothing.
+    func synchronizedOutputModeChanged (source: Terminal, enabled: Bool)
+
     /// Should raise the bell
     /// The default implementation does nothing.
     func bell (source: Terminal)
@@ -286,6 +291,7 @@ open class Terminal {
     
     var insertMode : Bool = false
     public var bracketedPasteMode : Bool = false
+    public var synchronizedOutputMode: Bool = false
     var charset : [UInt8:String]? = nil
     var gcharset : Int = 0
     var wraparound : Bool = false
@@ -3405,7 +3411,9 @@ open class Terminal {
                 
             case 2004: // bracketed paste mode (https://cirw.in/blog/bracketed-paste)
                 bracketedPasteMode = false
-                break
+            case 2026: // synchronized output mode
+                synchronizedOutputMode = false
+                tdel.synchronizedOutputModeChanged(source: self, enabled: false)
             default:
                 log ("Unhandled ? resetMode with \(par) and \(collect)")
                 break
@@ -3628,6 +3636,9 @@ open class Terminal {
             case 2004: // bracketed paste mode (https://cirw.in/blog/bracketed-paste)
                 // TODO: must implement bracketed paste mode
                 bracketedPasteMode = true
+            case 2026: // synchronized output mode
+                synchronizedOutputMode = true
+                tdel.synchronizedOutputModeChanged(source: self, enabled: true)
             default:
                 log ("Unhandled ? setMode with \(par) and \(collect)")
                 break;
@@ -4864,7 +4875,11 @@ public extension TerminalDelegate {
     func bufferActivated(source: Terminal) {
         // nothing
     }
-    
+
+    func synchronizedOutputModeChanged(source: Terminal, enabled: Bool) {
+        // nothing
+    }
+
     func windowCommand(source: Terminal, command: Terminal.WindowManipulationCommand) -> [UInt8]? {
         // no special handling
         return nil
