@@ -584,6 +584,7 @@ open class Terminal {
         marginMode = false
         insertMode = false
         wraparound = true
+        savedWraparound = wraparound
         bracketedPasteMode = false
         
         // charset'
