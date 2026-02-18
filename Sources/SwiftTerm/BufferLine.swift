@@ -133,7 +133,7 @@ public class BufferLine: CustomDebugStringConvertible {
         if len == cols {
             return
         }
-        
+
         if cols > len {
             var newData = Array.init(repeating: fillData, count: cols)
             if len > 0 {
@@ -180,7 +180,7 @@ public class BufferLine: CustomDebugStringConvertible {
     {
         for i in (0..<data.count).reversed() {
             if data [i].code != 0 {
-                return i + Int (data [i].width - 1)
+                return i + Int (data [i].width)
 //                for _ in 0...i {
 //                    width += Int (data [i].width)
 //                }
