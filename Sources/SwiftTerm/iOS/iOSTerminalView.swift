@@ -878,7 +878,10 @@ extension TerminalView: TerminalDelegate {
         // iOS TODO
         //X
     }
-    
+
+    open func kittyKeyboardModeChanged(source: Terminal) {
+    }
+
     open func lineChange(source: Terminal, y: Int) {
     }
     

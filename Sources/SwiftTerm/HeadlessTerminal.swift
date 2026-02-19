@@ -55,6 +55,9 @@ public class HeadlessTerminal : TerminalDelegate, LocalProcessDelegate {
     public func mouseModeChanged(source: Terminal) {
     }
 
+    public func kittyKeyboardModeChanged(source: Terminal) {
+    }
+
     public func hostCurrentDirectoryUpdated(source: Terminal) {
         dir = source.hostCurrentDirectory
     }
