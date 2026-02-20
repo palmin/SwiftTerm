@@ -1570,21 +1570,26 @@ open class Terminal {
     }
     
     // Copy to clipboard with sequence on the form:
-    //    ESC ] 52 ; c ; [base64 data] \a
-    // where c is for copy and the only thing supported.
+    //    ESC ] 52 ; Pc ; Pd \a
+    // Pc is the target: any combination of c,p,q,s,0-7.
+    // We copy to clipboard when Pc is empty or contains "c".
     func oscClipboard(_ data: ArraySlice<UInt8>) {
-        // we require data to start with c; followed by base64 content
-        guard data.count >= 2,
-              data[data.startIndex] == UInt8(ascii: "c"),
-              data[data.startIndex+1] == UInt8(ascii: ";") else {
+        // find the semicolon separating target from base64 content
+        guard let separatorIndex = data.firstIndex(of: UInt8(ascii: ";")) else {
             return
         }
-        
-        let base64 = Data(data[(data.startIndex+2)...])
+
+        // only act on empty target (default) or when "c" (clipboard) is specified
+        let target = data[data.startIndex..<separatorIndex]
+        guard target.isEmpty || target.contains(UInt8(ascii: "c")) else {
+            return
+        }
+
+        let base64 = Data(data[(data.index(after: separatorIndex))...])
         guard let content = Data(base64Encoded: base64) else {
             return
         }
-        
+
         tdel.clipboardCopy(source: self, content)
     }
     
