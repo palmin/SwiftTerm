@@ -321,6 +321,7 @@ open class Terminal {
     var reverseWraparound: Bool = false
     var savedReverseWraparound: Bool = false
     var tdel : TerminalDelegate!
+    public weak var tmuxDelegate: TerminalTmuxDelegate?
     var curAttr : Attribute = CharData.defaultAttr
     var gLevel: UInt8 = 0
     var cursorBlink: Bool = false
@@ -745,43 +746,70 @@ open class Terminal {
             // we fix tmux escaping of escape itself
             replacement.replace("\u{1b}Ptmux;\u{1b}\u{1b}", "\u{1b}")
             
-#if xxx_DEBUG
+#if false // verbose tmux debugging
             print("tmux decoded \(data.asDebugString?.trimmed() ?? "") into \(replacement[...].asDebugString ?? "")")
 #endif
             return replacement
         }
         
         if data.hasPrefix("%window-renamed ") {
-            // skip past pane identifier by looking for next space
+            // skip past window identifier by looking for next space
             guard let startOutput = data[(data.startIndex+16)...].firstIndex(of: 32) else {
                 return []
             }
-            
+
             let titleBytes = decode(from: startOutput + 1)
             if let title = String(data: Data(titleBytes), encoding: .utf8) {
                 setTitle (text: title)
+
+                // extract window id (between %window-renamed and the space before the name)
+                let windowIdBytes = [UInt8](data[(data.startIndex+16)..<startOutput])
+                let windowId = String(data: Data(windowIdBytes), encoding: .utf8) ?? ""
+                tmuxDelegate?.tmuxWindowRenamed(source: self, windowId: windowId, name: title)
             }
-            
+
             return []
         }
-        
+
+        if data.hasPrefix("%session-changed ") {
+            // format: %session-changed $sessionId $sessionName
+            let rest = data[(data.startIndex+17)...]
+            if let spaceIndex = rest.firstIndex(of: 32) {
+                let idBytes = [UInt8](rest[..<spaceIndex])
+                let nameBytes = decode(from: spaceIndex + 1)
+                let sessionId = String(data: Data(idBytes), encoding: .utf8) ?? ""
+                let sessionName = String(data: Data(nameBytes), encoding: .utf8) ?? ""
+                tmuxDelegate?.tmuxSessionChanged(source: self, sessionId: sessionId, sessionName: sessionName)
+            }
+            return []
+        }
+
+        if data.hasPrefix("%layout-change") || data.hasPrefix("%window-add") ||
+           data.hasPrefix("%window-close") || data.hasPrefix("%unlinked-window") ||
+           data.hasPrefix("%sessions-changed") || data.hasPrefix("%pause") ||
+           data.hasPrefix("%continue") {
+            // known notifications we can safely ignore in single-session mode
+            return []
+        }
+
         if data.hasPrefix("%alert-bell") {
             self.tdel.bell (source: self)
             return []
         }
-        
+
         if data.hasPrefix("%exit") && data.count >= 6 {
-#if xxx_DEBUG
+#if DEBUG
             print("tmux ending with command: \(data.asDebugString?.trimmed() ?? "")")
 #endif
-            
+
             let next = data[data.startIndex+5]
             if next == 10 || next == 13 {
                 parser.tmuxCommandMode = false
+                tmuxDelegate?.tmuxModeEnded(source: self)
                 return []
             }
         }
-        
+
         return []
     }
 
@@ -994,16 +1022,16 @@ open class Terminal {
         // DCS Handler
         parser.setDcsHandler ("$q", DECRQSS (terminal: self))
         parser.setDcsHandler ("q", SixelDcsHandler (terminal: self))
-        parser.dscHandlerFallback = { [weak parser] code, parameters in
-#if DEBUG || TESTFLIGHT
-            let todo = "remember to enable tmux command mode for all"
+        parser.dscHandlerFallback = { [weak self, weak parser] code, parameters in
             if let parser = parser {
                 let character = Character(UnicodeScalar(code))
                 if character == "p" && parameters == [1000] {
                     parser.tmuxCommandMode = true
+                    if let self = self {
+                        self.tmuxDelegate?.tmuxModeStarted(source: self)
+                    }
                 }
             }
-#endif
         }
         
         // tmux command mode
@@ -4866,6 +4894,14 @@ open class Terminal {
         }
         return l
     }
+}
+
+/// delegate for tmux control mode lifecycle events
+public protocol TerminalTmuxDelegate: AnyObject {
+    func tmuxModeStarted(source: Terminal)
+    func tmuxModeEnded(source: Terminal)
+    func tmuxSessionChanged(source: Terminal, sessionId: String, sessionName: String)
+    func tmuxWindowRenamed(source: Terminal, windowId: String, name: String)
 }
 
 // Default implementations

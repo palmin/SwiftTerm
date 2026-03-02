@@ -402,7 +402,7 @@ class EscapeSequenceParser {
     }
     
     private var unusedTmuxData = [UInt8]()
-    private var tmuxBlockIdentifier: Int?
+    private var tmuxBlockIdentifier: String?
     
     func parse(data allData: ArraySlice<UInt8>) {
         var data = allData // data is the unused part of the input
@@ -419,7 +419,7 @@ class EscapeSequenceParser {
                     ch == 10 || ch == 13 || ch == 32
                 }
                 var i = data.startIndex
-#if xxx_DEBUG
+#if false // verbose tmux debugging
                 print("tmux: Looking for command at: \(data.debugString(around: i))")
 #endif
                 let end = data.endIndex
@@ -446,11 +446,15 @@ class EscapeSequenceParser {
                 
                 // tmux information starts with % (ascii 37)
                 guard data[i] == 37 else {
-                    // we leave tmux command mode on parser error
+                    // skip unexpected data instead of exiting tmux mode
 #if DEBUG
-                    print("tmux: parser error at: \(data.debugString(around: i))")
+                    print("tmux: skipping unexpected data at: \(data.debugString(around: i))")
 #endif
-                    tmuxCommandMode = false
+                    // skip to next newline
+                    while i < end && data[i] != 10 && data[i] != 13 {
+                        i += 1
+                    }
+                    data = data[i...]
                     continue
                 }
                 
@@ -473,27 +477,34 @@ class EscapeSequenceParser {
 
                 if let identifier = tmuxBlockIdentifier {
                     // only the correct %end/%error commands can satisfy us
-                    if bytes.hasPrefix("%end \(identifier) ") ||
-                       bytes.hasPrefix("%error \(identifier) ") {
-                        
+                    if bytes.hasPrefix("%end \(identifier)") ||
+                       bytes.hasPrefix("%error \(identifier)") {
+
                         // block ended
                         tmuxBlockIdentifier = nil
                     } else {
                         // block didn't end so the line is passed along
                         let _ = parse2(data: bytes[...])
                     }
-                    
+
                     continue
                 }
                                 
                 // check if we started multiline response
                 if bytes.hasPrefix("%begin ") {
+                    // format: %begin timestamp commandNumber flags
+                    // we store "timestamp commandNumber" to match %end/%error
                     let postfix = bytes.dropFirst(7)
-                    if let digitEnd = postfix.firstIndex(of: 32),
-                       let string = String(data: Data(postfix[..<digitEnd]), encoding: .utf8),
-                       let digit = Int(string) {
-                        
-                        tmuxBlockIdentifier = digit
+                    // find end of line (strip CR/LF)
+                    var lineEnd = postfix.endIndex
+                    for j in postfix.startIndex..<postfix.endIndex {
+                        if postfix[j] == 10 || postfix[j] == 13 {
+                            lineEnd = j
+                            break
+                        }
+                    }
+                    if let identifier = String(data: Data(postfix[..<lineEnd]), encoding: .utf8) {
+                        tmuxBlockIdentifier = identifier
                         continue
                     }
                 }
