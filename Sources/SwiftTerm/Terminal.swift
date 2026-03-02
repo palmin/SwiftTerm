@@ -705,6 +705,11 @@ open class Terminal {
     public var tmuxCommandMode: Bool {
         return parser.tmuxCommandMode
     }
+
+    /// Non-nil when the parser is inside a %begin/%end block
+    public var tmuxBlockIdentifier: String? {
+        return parser.tmuxBlockIdentifier
+    }
     
     func tmuxHandler(_ data: ArraySlice<UInt8>) -> [UInt8]? {
         func decode(from offset: Int) -> [UInt8] {
@@ -740,12 +745,19 @@ open class Terminal {
             guard let startOutput = data[(data.startIndex+8)...].firstIndex(of: 32) else {
                 return nil
             }
-                        
+
+#if DEBUG
+            // log the pane identifier we receive data for
+            let paneIdBytes = [UInt8](data[(data.startIndex+8)..<startOutput])
+            let paneId = String(data: Data(paneIdBytes), encoding: .utf8) ?? "?"
+            print("tmux: %output pane=\(paneId) bytes=\(data.count - (startOutput + 1 - data.startIndex))")
+#endif
+
             var replacement = decode(from: startOutput + 1)
 
             // we fix tmux escaping of escape itself
             replacement.replace("\u{1b}Ptmux;\u{1b}\u{1b}", "\u{1b}")
-            
+
 #if false // verbose tmux debugging
             print("tmux decoded \(data.asDebugString?.trimmed() ?? "") into \(replacement[...].asDebugString ?? "")")
 #endif
@@ -765,6 +777,9 @@ open class Terminal {
                 // extract window id (between %window-renamed and the space before the name)
                 let windowIdBytes = [UInt8](data[(data.startIndex+16)..<startOutput])
                 let windowId = String(data: Data(windowIdBytes), encoding: .utf8) ?? ""
+#if DEBUG
+                print("tmux: %window-renamed window=\(windowId) title=\(title)")
+#endif
                 tmuxDelegate?.tmuxWindowRenamed(source: self, windowId: windowId, name: title)
             }
 
@@ -779,9 +794,14 @@ open class Terminal {
                 let nameBytes = decode(from: spaceIndex + 1)
                 let sessionId = String(data: Data(idBytes), encoding: .utf8) ?? ""
                 let sessionName = String(data: Data(nameBytes), encoding: .utf8) ?? ""
+#if DEBUG
+                print("tmux: %session-changed id=\(sessionId) name=\(sessionName)")
+#endif
                 tmuxDelegate?.tmuxSessionChanged(source: self, sessionId: sessionId, sessionName: sessionName)
             }
-            return []
+            // cursor home so capture-pane content renders from top-left,
+            // overwriting old session content without a visible blank flash
+            return Array("\u{1b}[H".utf8)
         }
 
         if data.hasPrefix("%layout-change") || data.hasPrefix("%window-add") ||
@@ -799,7 +819,7 @@ open class Terminal {
 
         if data.hasPrefix("%exit") && data.count >= 6 {
 #if DEBUG
-            print("tmux ending with command: \(data.asDebugString?.trimmed() ?? "")")
+            print("tmux: %exit received")
 #endif
 
             let next = data[data.startIndex+5]
@@ -810,6 +830,12 @@ open class Terminal {
             }
         }
 
+#if DEBUG
+        // log any unhandled tmux notification
+        if let line = String(data: Data(data), encoding: .utf8) {
+            print("tmux: unhandled: \(line.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+#endif
         return []
     }
 
@@ -4371,6 +4397,9 @@ open class Terminal {
     /// for a soft reset see `softReset`
     public func resetToInitialState ()
     {
+#if DEBUG
+        print("tmux: resetToInitialState called")
+#endif
         options.rows = rows
         options.cols = cols
         let savedCursorHidden = cursorHidden

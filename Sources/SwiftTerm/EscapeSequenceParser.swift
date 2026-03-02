@@ -402,7 +402,7 @@ class EscapeSequenceParser {
     }
     
     private var unusedTmuxData = [UInt8]()
-    private var tmuxBlockIdentifier: String?
+    var tmuxBlockIdentifier: String?
     
     func parse(data allData: ArraySlice<UInt8>) {
         var data = allData // data is the unused part of the input
@@ -437,7 +437,11 @@ class EscapeSequenceParser {
                 // skip/process along as much data as we have
                 if i > data.startIndex {
                     if tmuxBlockIdentifier != nil {
+                        // render block content (e.g. capture-pane responses)
                         let content = [UInt8](data[..<i])
+#if DEBUG
+                        print("tmux: block content \(content.count) bytes")
+#endif
                         let _ = parse2(data: content[...])
                     }
                     data = data[i...]
@@ -479,17 +483,23 @@ class EscapeSequenceParser {
                     // only the correct %end/%error commands can satisfy us
                     if bytes.hasPrefix("%end \(identifier)") ||
                        bytes.hasPrefix("%error \(identifier)") {
-
+#if DEBUG
+                        let kind = bytes.hasPrefix("%error") ? "error" : "end"
+                        print("tmux: block \(kind) [\(identifier)]")
+#endif
                         // block ended
                         tmuxBlockIdentifier = nil
                     } else {
-                        // block didn't end so the line is passed along
+                        // render block content (e.g. capture-pane responses)
+#if DEBUG
+                        print("tmux: block line \(bytes.count) bytes")
+#endif
                         let _ = parse2(data: bytes[...])
                     }
 
                     continue
                 }
-                                
+
                 // check if we started multiline response
                 if bytes.hasPrefix("%begin ") {
                     // format: %begin timestamp commandNumber flags
@@ -504,6 +514,9 @@ class EscapeSequenceParser {
                         }
                     }
                     if let identifier = String(data: Data(postfix[..<lineEnd]), encoding: .utf8) {
+#if DEBUG
+                        print("tmux: block begin [\(identifier)]")
+#endif
                         tmuxBlockIdentifier = identifier
                         continue
                     }
