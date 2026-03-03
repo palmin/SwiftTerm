@@ -706,6 +706,15 @@ open class Terminal {
         return parser.tmuxCommandMode
     }
 
+    /// clears tmux command mode state on the parser so the terminal
+    /// returns to normal operation (used when disconnecting from a
+    /// control mode session before reconnecting in normal mode)
+    public func exitTmuxCommandMode() {
+        parser.tmuxCommandMode = false
+        parser.tmuxBlockIdentifier = nil
+        parser.tmuxBlockPendingLF = false
+    }
+
     /// Non-nil when the parser is inside a %begin/%end block
     public var tmuxBlockIdentifier: String? {
         return parser.tmuxBlockIdentifier

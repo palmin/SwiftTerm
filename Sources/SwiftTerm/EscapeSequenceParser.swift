@@ -411,7 +411,7 @@ class EscapeSequenceParser {
     // we buffer it and only emit it when the next chunk arrives, so the
     // trailing newline before %end is discarded (prevents capture-pane's
     // final \n from scrolling the first row off screen)
-    private var tmuxBlockPendingLF = false
+    var tmuxBlockPendingLF = false
     
     func parse(data allData: ArraySlice<UInt8>) {
         var data = allData // data is the unused part of the input
