@@ -761,9 +761,10 @@ open class Terminal {
 #if false // verbose tmux debugging
             print("tmux decoded \(data.asDebugString?.trimmed() ?? "") into \(replacement[...].asDebugString ?? "")")
 #endif
+            tmuxDelegate?.tmuxPaneOutput(source: self)
             return replacement
         }
-        
+
         if data.hasPrefix("%window-renamed ") {
             // skip past window identifier by looking for next space
             guard let startOutput = data[(data.startIndex+16)...].firstIndex(of: 32) else {
@@ -1063,6 +1064,34 @@ open class Terminal {
         // tmux command mode
         parser.tmuxCommandHandler = { [weak self] bytes in
             return self?.tmuxHandler(bytes)
+        }
+        parser.tmuxBlockContentHandler = { [weak self] bytes in
+            guard let self = self else { return false }
+            // intercept tagged state query responses before they reach parse2
+            if bytes.hasPrefix("SFSTATE:") {
+                let payload = bytes.dropFirst(8)
+                let trimmed = payload.prefix(while: { $0 != 10 && $0 != 13 })
+                if let state = String(data: Data(trimmed), encoding: .utf8) {
+                    self.restoreTmuxState(from: state)
+                }
+                return true
+            }
+            if bytes.hasPrefix("SFCURSOR:") {
+                let payload = bytes.dropFirst(9)
+                let trimmed = payload.prefix(while: { $0 != 10 && $0 != 13 })
+                if let str = String(data: Data(trimmed), encoding: .utf8) {
+                    let parts = str.split(separator: ":")
+                    if parts.count == 2, let cx = Int(parts[0]), let cy = Int(parts[1]) {
+                        self.buffer.x = min(cx, self.cols - 1)
+                        self.buffer.y = min(cy, self.rows - 1)
+#if DEBUG
+                        print("tmux: restored cursor=(\(self.buffer.x),\(self.buffer.y))")
+#endif
+                    }
+                }
+                return true
+            }
+            return false
         }
     }
     
@@ -4409,6 +4438,85 @@ open class Terminal {
         syncScrollArea ()
     }
 
+    /// Restores terminal state from tmux pane flags (queried via display-message).
+    /// The input is tab-separated key=value pairs matching tmux format variables.
+    public func restoreTmuxState(from state: String) {
+#if DEBUG
+        print("tmux: pre-restore cursor=(\(buffer.x),\(buffer.y)) scrollRegion=\(buffer.scrollTop)-\(buffer.scrollBottom) rows=\(rows) alt=\(buffers!.isAlternateBuffer)")
+#endif
+        var dict = [String: String]()
+        for pair in state.split(separator: "\t") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            if kv.count == 2 {
+                dict[String(kv[0])] = String(kv[1])
+            }
+        }
+
+        func flag(_ key: String) -> Bool { dict[key] == "1" }
+        func int(_ key: String) -> Int? { dict[key].flatMap { Int($0) } }
+
+        // mouse mode (priority matches iTerm2/tmux tty.c)
+        if flag("mouse_all_flag") {
+            mouseMode = .anyEvent
+        } else if flag("mouse_button_flag") {
+            mouseMode = .buttonEventTracking
+        } else if flag("mouse_standard_flag") {
+            mouseMode = .vt200
+        } else {
+            mouseMode = .off
+        }
+
+        // mouse protocol encoding (SGR takes priority over UTF-8)
+        if flag("mouse_sgr_flag") {
+            mouseProtocol = .sgr
+        } else if flag("mouse_utf8_flag") {
+            mouseProtocol = .utf8
+        } else {
+            mouseProtocol = .x10
+        }
+
+        // cursor visibility
+        if let v = dict["cursor_flag"] { cursorHidden = v == "0" }
+
+        // insert mode
+        if let v = dict["insert_flag"] { insertMode = v == "1" }
+
+        // application cursor keys (DECCKM)
+        if let v = dict["keypad_cursor_flag"] { applicationCursor = v == "1" }
+
+        // application keypad
+        if let v = dict["keypad_flag"] { applicationKeypad = v == "1" }
+
+        // wraparound mode
+        if let v = dict["wrap_flag"] { wraparound = v == "1" }
+
+        // scroll region
+        if let top = int("scroll_region_upper"), let bottom = int("scroll_region_lower") {
+            buffer.scrollTop = top
+            buffer.scrollBottom = bottom
+        }
+
+        // alternate screen
+        let altOn = flag("alternate_on")
+        let isAlt = buffers!.isAlternateBuffer
+        if altOn && !isAlt {
+            buffers!.activateAltBuffer(fillAttr: nil)
+            tdel.bufferActivated(source: self)
+        } else if !altOn && isAlt {
+            buffers!.activateNormalBuffer(clearAlt: false)
+            tdel.bufferActivated(source: self)
+        }
+
+        // position cursor at top-left so capture-pane content renders from the start;
+        // the SFCURSOR query after capture-pane will restore the correct position
+        buffer.x = 0
+        buffer.y = 0
+
+#if DEBUG
+        print("tmux: restored state: mouse=\(mouseMode)/\(mouseProtocol) alt=\(altOn) scroll=\(buffer.scrollTop)-\(buffer.scrollBottom) insert=\(insertMode) appCursor=\(applicationCursor) wrap=\(wraparound)")
+#endif
+    }
+
     // Support for:
     // ESC 6 Back Index (DECBI) and
     // ESC 9 Forward Index (DECFI)
@@ -4931,6 +5039,12 @@ public protocol TerminalTmuxDelegate: AnyObject {
     func tmuxModeEnded(source: Terminal)
     func tmuxSessionChanged(source: Terminal, sessionId: String, sessionName: String)
     func tmuxWindowRenamed(source: Terminal, windowId: String, name: String)
+    /// called when %output data has been processed for a pane
+    func tmuxPaneOutput(source: Terminal)
+}
+
+public extension TerminalTmuxDelegate {
+    func tmuxPaneOutput(source: Terminal) {}
 }
 
 // Default implementations
