@@ -719,6 +719,11 @@ open class Terminal {
     public var tmuxBlockIdentifier: String? {
         return parser.tmuxBlockIdentifier
     }
+
+    /// When true, the next non-intercepted block content will home the cursor
+    /// before rendering (used for capture-pane). Set by TerminalController
+    /// before sending capture-pane commands.
+    public var tmuxCaptureInProgress = false
     
     func tmuxHandler(_ data: ArraySlice<UInt8>) -> [UInt8]? {
         func decode(from offset: Int) -> [UInt8] {
@@ -1093,10 +1098,47 @@ open class Terminal {
                     if parts.count == 2, let cx = Int(parts[0]), let cy = Int(parts[1]) {
                         self.buffer.x = min(cx, self.cols - 1)
                         self.buffer.y = min(cy, self.rows - 1)
+                        self.tmuxCaptureInProgress = false
 #if DEBUG
-                        print("tmux: restored cursor=(\(self.buffer.x),\(self.buffer.y))")
+                        print("tmux: restored cursor=(\(self.buffer.x),\(self.buffer.y)) captureInProgress=false")
 #endif
                     }
+                }
+                return true
+            }
+            // intercept capture-pane content: home cursor and strip trailing
+            // empty lines (unused pane area) before rendering
+            if self.tmuxCaptureInProgress {
+                self.buffer.x = 0
+                self.buffer.y = 0
+
+                // strip trailing empty lines (\r\n preceded by \n or at data start)
+                var data = Array(bytes)
+                var trimEnd = data.count
+                while trimEnd >= 2 && data[trimEnd - 1] == 10 && data[trimEnd - 2] == 13 {
+                    if trimEnd == 2 || data[trimEnd - 3] == 10 {
+                        trimEnd -= 2
+                    } else {
+                        break
+                    }
+                }
+                data = Array(data[..<trimEnd])
+
+                // replicate the parser's pending LF logic
+                if self.parser.tmuxBlockPendingLF {
+                    data.insert(10, at: 0)
+                    self.parser.tmuxBlockPendingLF = false
+                }
+                if data.last == 10 {
+                    data.removeLast()
+                    if data.last == 13 { data.removeLast() }
+                    self.parser.tmuxBlockPendingLF = true
+                }
+                if !data.isEmpty {
+#if DEBUG
+                    print("tmux: capture content \(data.count) bytes (trimmed from \(bytes.count))")
+#endif
+                    let _ = self.parser.parse2(data: data[...])
                 }
                 return true
             }
@@ -2995,7 +3037,56 @@ open class Terminal {
     {
         cmdSoftReset()
     }
-    
+
+#if DEBUG
+    /// dumps all terminal modes and properties for debugging
+    public func debugDumpModes() {
+        let (curX, curY) = getCursorLocation()
+        let altBuffer = buffers!.isAlternateBuffer
+
+        print("===== TERMINAL MODES & PROPERTIES =====")
+        print("dimensions: \(cols)x\(rows)")
+        print("cursor: (\(curX), \(curY)), hidden=\(cursorHidden), blink=\(cursorBlink)")
+        print("alternate buffer: \(altBuffer)")
+        print("scroll region: top=\(buffer.scrollTop), bottom=\(buffer.scrollBottom)")
+        print("margins: left=\(buffer.marginLeft), right=\(buffer.marginRight), marginMode=\(marginMode)")
+        print("yBase=\(buffer.yBase), yDisp=\(buffer.yDisp), linesTop=\(buffer.linesTop)")
+
+        print("--- DEC modes ---")
+        print("applicationCursor (DECCKM): \(applicationCursor)")
+        print("applicationKeypad (DECNKM): \(applicationKeypad)")
+        print("originMode (DECOM): \(originMode)")
+        print("wraparound (DECAWM): \(wraparound)")
+        print("reverseWraparound: \(reverseWraparound)")
+        print("insertMode (IRM): \(insertMode)")
+        print("lineFeedMode (LNM): \(lineFeedMode)")
+        print("allow80To132 (DECCOLM): \(allow80To132)")
+        print("bracketedPasteMode: \(bracketedPasteMode)")
+        print("synchronizedOutputMode: \(synchronizedOutputMode)")
+        print("sendFocus: \(sendFocus)")
+
+        print("--- mouse ---")
+        print("mouseMode: \(mouseMode)")
+        print("mouseProtocol: \(mouseProtocol)")
+
+        print("--- keyboard ---")
+        print("kittyKeyboardFlags: \(kittyKeyboardFlags) (stack: \(kittyKeyboardStack))")
+        print("conformance: \(conformance)")
+
+        print("--- charset ---")
+        print("gLevel: \(gLevel), gcharset: \(gcharset), charset: \(charset?.description ?? "nil")")
+
+        print("--- colors ---")
+        print("foreground: \(foregroundColor), background: \(backgroundColor)")
+
+        print("--- host info ---")
+        print("hostCurrentDirectory: \(hostCurrentDirectory ?? "nil")")
+        print("hostCurrentDocument: \(hostCurrentDocument ?? "nil")")
+        print("tmuxCommandMode: \(tmuxCommandMode)")
+        print("========================================")
+    }
+#endif
+
     //
     // CSI Ps n  Device Status Report (DSR).
     //     Ps = 5  -> Status Report.  Result (``OK'') is
@@ -4516,10 +4607,12 @@ open class Terminal {
             tdel.bufferActivated(source: self)
         }
 
-        // position cursor at top-left so capture-pane content renders from the start;
-        // the SFCURSOR query after capture-pane will restore the correct position
-        buffer.x = 0
-        buffer.y = 0
+        // restore cursor from state data; if a capture-pane follows,
+        // tmuxCaptureInProgress will home cursor before rendering
+        if let cx = int("cursor_x"), let cy = int("cursor_y") {
+            buffer.x = min(cx, cols - 1)
+            buffer.y = min(cy, rows - 1)
+        }
 
 #if DEBUG
         print("tmux: restored state: mouse=\(mouseMode)/\(mouseProtocol) alt=\(altOn) scroll=\(buffer.scrollTop)-\(buffer.scrollBottom) insert=\(insertMode) appCursor=\(applicationCursor) wrap=\(wraparound)")
