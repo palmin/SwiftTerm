@@ -437,8 +437,15 @@ class EscapeSequenceParser {
                 }
                 
                 // we jump past anything that isn't % (ascii 37) when looking for command %end/%error
+                // only stop at % that starts a line (after \n or at data start) to avoid
+                // splitting mid-line content like shell prompts containing %
                 if tmuxBlockIdentifier != nil {
-                    while i < end && data[i] != 37 {
+                    while i < end {
+                        if data[i] == 37 {
+                            if i == data.startIndex || data[i - 1] == 10 {
+                                break
+                            }
+                        }
                         i += 1
                     }
                 }
