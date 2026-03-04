@@ -268,7 +268,7 @@ class Buffer {
         print("Resize before: y = \(y), yBase=\(yBase)")
 #endif
         
-        if marginRight > newCols - 1 {
+        if marginRight == cols - 1 || marginRight > newCols - 1 {
             marginRight = newCols - 1
         }
         if marginLeft >= marginRight {
