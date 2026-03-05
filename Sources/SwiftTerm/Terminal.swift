@@ -1109,10 +1109,17 @@ open class Terminal {
             if self.tmuxCaptureInProgress {
                 self.buffer.x = 0
                 self.buffer.y = 0
+                // strip trailing CR/LF to avoid scrolling past the last row
+                var trimmed = bytes
+                while let last = trimmed.last, last == 10 || last == 13 {
+                    trimmed = trimmed.dropLast()
+                }
 #if DEBUG
-                print("tmux: capture content \(bytes.count) bytes")
+                print("tmux: capture content \(bytes.count) bytes (\(trimmed.count) trimmed)")
 #endif
-                let _ = self.parser.parse2(data: bytes)
+                if !trimmed.isEmpty {
+                    let _ = self.parser.parse2(data: trimmed)
+                }
                 return true
             }
             return false
