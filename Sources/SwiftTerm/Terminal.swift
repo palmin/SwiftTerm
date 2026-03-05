@@ -724,6 +724,7 @@ open class Terminal {
     /// before rendering (used for capture-pane). Set by TerminalController
     /// before sending capture-pane commands.
     public var tmuxCaptureInProgress = false
+    var tmuxCaptureNeedsHome = false
     
     func tmuxHandler(_ data: ArraySlice<UInt8>) -> [UInt8]? {
         func decode(from offset: Int) -> [UInt8] {
@@ -814,9 +815,7 @@ open class Terminal {
 #endif
                 tmuxDelegate?.tmuxSessionChanged(source: self, sessionId: sessionId, sessionName: sessionName)
             }
-            // cursor home so capture-pane content renders from top-left,
-            // overwriting old session content without a visible blank flash
-            return Array("\u{1b}[H".utf8)
+            return []
         }
 
         if data.hasPrefix("%layout-change") || data.hasPrefix("%window-add") ||
@@ -1109,8 +1108,13 @@ open class Terminal {
             // intercept capture-pane content: home cursor and strip trailing
             // empty lines (unused pane area) before rendering
             if self.tmuxCaptureInProgress {
-                self.buffer.x = 0
-                self.buffer.y = 0
+                // only home cursor on the first chunk; subsequent chunks
+                // continue from where the previous chunk left off
+                if self.tmuxCaptureNeedsHome {
+                    self.buffer.x = 0
+                    self.buffer.y = 0
+                    self.tmuxCaptureNeedsHome = false
+                }
 
                 // strip trailing empty lines (\r\n preceded by \n or at data start)
                 var data = Array(bytes)
@@ -3083,6 +3087,22 @@ open class Terminal {
         print("hostCurrentDirectory: \(hostCurrentDirectory ?? "nil")")
         print("hostCurrentDocument: \(hostCurrentDocument ?? "nil")")
         print("tmuxCommandMode: \(tmuxCommandMode)")
+
+        // dump visible content as text for comparison
+        print("--- visible content ---")
+        for row in 0..<rows {
+            var line = ""
+            for col in 0..<cols {
+                if let ch = getCharacter(col: col, row: row) {
+                    line.append(ch)
+                } else {
+                    line.append(" ")
+                }
+            }
+            // trim trailing spaces for readability
+            let trimmed = line.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+            print("[\(String(format: "%02d", row))] \(trimmed)")
+        }
         print("========================================")
     }
 #endif
