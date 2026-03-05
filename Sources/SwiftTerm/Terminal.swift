@@ -712,7 +712,7 @@ open class Terminal {
     public func exitTmuxCommandMode() {
         parser.tmuxCommandMode = false
         parser.tmuxBlockIdentifier = nil
-        parser.tmuxBlockPendingLF = false
+        parser.tmuxBlockContent.removeAll()
     }
 
     /// Non-nil when the parser is inside a %begin/%end block
@@ -724,7 +724,6 @@ open class Terminal {
     /// before rendering (used for capture-pane). Set by TerminalController
     /// before sending capture-pane commands.
     public var tmuxCaptureInProgress = false
-    var tmuxCaptureNeedsHome = false
     
     func tmuxHandler(_ data: ArraySlice<UInt8>) -> [UInt8]? {
         func decode(from offset: Int) -> [UInt8] {
@@ -1078,17 +1077,16 @@ open class Terminal {
         parser.tmuxCommandHandler = { [weak self] bytes in
             return self?.tmuxHandler(bytes)
         }
+        // called once per block with complete content between %begin and %end
         parser.tmuxBlockContentHandler = { [weak self] bytes in
             guard let self = self else { return false }
-            // intercept tagged state query responses before they reach parse2
+
+            // intercept SFSTATE: pane state query response
             if bytes.hasPrefix("SFSTATE:") {
-                let payload = bytes.dropFirst(8)
-                let trimmed = payload.prefix(while: { $0 != 10 && $0 != 13 })
-                if let state = String(data: Data(trimmed), encoding: .utf8) {
-                    self.restoreTmuxState(from: state)
-                }
+                self.processSFSTATE(bytes)
                 return true
             }
+            // intercept SFCURSOR: cursor position response
             if bytes.hasPrefix("SFCURSOR:") {
                 let payload = bytes.dropFirst(9)
                 let trimmed = payload.prefix(while: { $0 != 10 && $0 != 13 })
@@ -1109,32 +1107,12 @@ open class Terminal {
             }
             // intercept capture-pane -peN content: home cursor and render
             if self.tmuxCaptureInProgress {
-                // only home cursor on the first chunk; subsequent chunks
-                // continue from where the previous chunk left off
-                if self.tmuxCaptureNeedsHome {
-                    self.buffer.x = 0
-                    self.buffer.y = 0
-                    self.tmuxCaptureNeedsHome = false
-                }
-
-                var data = Array(bytes)
-
-                // replicate the parser's pending LF logic
-                if self.parser.tmuxBlockPendingLF {
-                    data.insert(10, at: 0)
-                    self.parser.tmuxBlockPendingLF = false
-                }
-                if data.last == 10 {
-                    data.removeLast()
-                    if data.last == 13 { data.removeLast() }
-                    self.parser.tmuxBlockPendingLF = true
-                }
-                if !data.isEmpty {
+                self.buffer.x = 0
+                self.buffer.y = 0
 #if DEBUG
-                    print("tmux: capture content \(data.count) bytes")
+                print("tmux: capture content \(bytes.count) bytes")
 #endif
-                    let _ = self.parser.parse2(data: data[...])
-                }
+                let _ = self.parser.parse2(data: bytes)
                 return true
             }
             return false
@@ -4560,6 +4538,15 @@ open class Terminal {
         syncScrollArea ()
     }
 
+    // extracts state string from SFSTATE:...:SFSTATE envelope and restores
+    func processSFSTATE(_ bytes: ArraySlice<UInt8>) {
+        let payload = bytes.dropFirst(8) // strip "SFSTATE:" prefix
+        let trimmed = payload.prefix(while: { $0 != 10 && $0 != 13 })
+        if let state = String(data: Data(trimmed), encoding: .utf8) {
+            restoreTmuxState(from: state)
+        }
+    }
+
     /// Restores terminal state from tmux pane flags (queried via display-message).
     /// The input is tab-separated key=value pairs matching tmux format variables.
     public func restoreTmuxState(from state: String) {
@@ -4633,12 +4620,14 @@ open class Terminal {
         }
 
         // saved cursor for alternate screen
-        if let sx = int("alternate_saved_x"), let sy = int("alternate_saved_y") {
+        // tmux returns 4294967295 (UINT_MAX) when no saved cursor exists
+        if let sx = int("alternate_saved_x"), let sy = int("alternate_saved_y"),
+           sx < cols, sy < rows {
             // when alternate is active, these are the normal-screen saved cursor
             // when normal is active, these are the alternate-screen saved cursor
             let otherBuffer = altOn ? buffers!.normal : buffers!.alt
-            otherBuffer.savedX = min(sx, cols - 1)
-            otherBuffer.savedY = min(sy, rows - 1)
+            otherBuffer.savedX = sx
+            otherBuffer.savedY = sy
         }
 
         // tab stops
@@ -4655,21 +4644,21 @@ open class Terminal {
             }
         }
 
-        // cursor style and blink
+        // cursor style and blink (skip if tmux doesn't have these variables)
         let blinking = flag("cursor_blinking")
-        if let shape = dict["cursor_shape"] {
+        if let shape = dict["cursor_shape"], !shape.isEmpty {
             let style: CursorStyle
             switch shape {
             case "underline":
                 style = blinking ? .blinkUnderline : .steadyUnderline
             case "bar":
                 style = blinking ? .blinkingBar : .steadyBar
-            default: // "block"
+            default: // "block" or "default"
                 style = blinking ? .blinkBlock : .steadyBlock
             }
             setCursorStyle(style)
+            cursorBlink = blinking
         }
-        cursorBlink = blinking
 
         // restore cursor from state data; if a capture-pane follows,
         // tmuxCaptureInProgress will home cursor before rendering
@@ -5337,16 +5326,17 @@ extension ArraySlice where Element == UInt8 {
         var k = 0
         for char in string {
             guard k < count else { return false }
-            
+
             if self[startIndex+k] != char.asciiValue {
                 return false
             }
-            
+
             k += 1
         }
         return true
     }
-    
+
+
 #if DEBUG
     // this call is expensive and should be used for debugging only
     var asDebugString: String? {

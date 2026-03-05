@@ -407,11 +407,9 @@ class EscapeSequenceParser {
     
     private var unusedTmuxData = [UInt8]()
     var tmuxBlockIdentifier: String?
-    // tracks whether the last chunk of block content ended with a newline;
-    // we buffer it and only emit it when the next chunk arrives, so the
-    // trailing newline before %end is discarded (prevents capture-pane's
-    // final \n from scrolling the first row off screen)
-    var tmuxBlockPendingLF = false
+    // accumulates all content between %begin and %end; the handler is
+    // called once with the complete content when %end is received
+    var tmuxBlockContent = [UInt8]()
     
     func parse(data allData: ArraySlice<UInt8>) {
         var data = allData // data is the unused part of the input
@@ -453,28 +451,7 @@ class EscapeSequenceParser {
                 // skip/process along as much data as we have
                 if i > data.startIndex {
                     if tmuxBlockIdentifier != nil {
-                        let content = [UInt8](data[..<i])
-                        if !tmuxBlockContentHandler(content[...]) {
-                            // render block content (e.g. capture-pane responses)
-                            // buffer trailing newline so the final \n before %end
-                            // doesn't cause an unwanted scroll
-                            var toRender = content
-                            if tmuxBlockPendingLF {
-                                toRender.insert(10, at: 0)
-                                tmuxBlockPendingLF = false
-                            }
-                            if toRender.last == 10 {
-                                toRender.removeLast()
-                                if toRender.last == 13 { toRender.removeLast() }
-                                tmuxBlockPendingLF = true
-                            }
-                            if !toRender.isEmpty {
-#if DEBUG
-                                print("tmux: block content \(toRender.count) bytes")
-#endif
-                                let _ = parse2(data: toRender[...])
-                            }
-                        }
+                        tmuxBlockContent.append(contentsOf: data[..<i])
                     }
                     data = data[i...]
                     continue
@@ -519,32 +496,28 @@ class EscapeSequenceParser {
                         let kind = bytes.hasPrefix("%error") ? "error" : "end"
                         print("tmux: block \(kind) [\(identifier)]")
 #endif
-                        // block ended — discard any buffered trailing newline
+                        let content = tmuxBlockContent
                         tmuxBlockIdentifier = nil
-                        tmuxBlockPendingLF = false
-                    } else if tmuxBlockContentHandler(bytes) {
-                        // consumed by handler (e.g. mouse state query)
-                        () // fall through to continue
-                    } else {
-                        // render block content (e.g. capture-pane responses)
-                        // buffer trailing newline so the final \n before %end
-                        // doesn't cause an unwanted scroll
-                        var toRender = [UInt8](bytes)
-                        if tmuxBlockPendingLF {
-                            toRender.insert(10, at: 0)
-                            tmuxBlockPendingLF = false
-                        }
-                        if toRender.last == 10 {
-                            toRender.removeLast()
-                            if toRender.last == 13 { toRender.removeLast() }
-                            tmuxBlockPendingLF = true
-                        }
-                        if !toRender.isEmpty {
+                        tmuxBlockContent.removeAll()
+
+                        // deliver complete block content to handler
+                        if !content.isEmpty && !tmuxBlockContentHandler(content[...]) {
+                            // not consumed — render as terminal content
+                            // strip trailing CR/LF (the newline before %end)
+                            var toRender = content
+                            while toRender.last == 10 || toRender.last == 13 {
+                                toRender.removeLast()
+                            }
+                            if !toRender.isEmpty {
 #if DEBUG
-                            print("tmux: block line \(toRender.count) bytes")
+                                print("tmux: block content \(toRender.count) bytes")
 #endif
-                            let _ = parse2(data: toRender[...])
+                                let _ = parse2(data: toRender[...])
+                            }
                         }
+                    } else {
+                        // accumulate line into block buffer
+                        tmuxBlockContent.append(contentsOf: bytes)
                     }
 
                     continue
@@ -568,7 +541,7 @@ class EscapeSequenceParser {
                         print("tmux: block begin [\(identifier)]")
 #endif
                         tmuxBlockIdentifier = identifier
-                        tmuxBlockPendingLF = false
+                        tmuxBlockContent.removeAll()
                         continue
                     }
                 }
