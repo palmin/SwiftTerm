@@ -4612,6 +4612,9 @@ open class Terminal {
         // wraparound mode
         if let v = dict["wrap_flag"] { wraparound = v == "1" }
 
+        // origin mode (DECOM)
+        if let v = dict["origin_flag"] { originMode = v == "1" }
+
         // scroll region
         if let top = int("scroll_region_upper"), let bottom = int("scroll_region_lower") {
             buffer.scrollTop = top
@@ -4629,6 +4632,45 @@ open class Terminal {
             tdel.bufferActivated(source: self)
         }
 
+        // saved cursor for alternate screen
+        if let sx = int("alternate_saved_x"), let sy = int("alternate_saved_y") {
+            // when alternate is active, these are the normal-screen saved cursor
+            // when normal is active, these are the alternate-screen saved cursor
+            let otherBuffer = altOn ? buffers!.normal : buffers!.alt
+            otherBuffer.savedX = min(sx, cols - 1)
+            otherBuffer.savedY = min(sy, rows - 1)
+        }
+
+        // tab stops
+        if let tabs = dict["pane_tabs"], !tabs.isEmpty {
+            let tabCols = tabs.split(separator: ",").compactMap { Int($0) }
+            if !tabCols.isEmpty {
+                // clear all and set from tmux data
+                for i in 0..<buffer.tabStops.count {
+                    buffer.tabStops[i] = false
+                }
+                for col in tabCols where col < buffer.tabStops.count {
+                    buffer.tabStops[col] = true
+                }
+            }
+        }
+
+        // cursor style and blink
+        let blinking = flag("cursor_blinking")
+        if let shape = dict["cursor_shape"] {
+            let style: CursorStyle
+            switch shape {
+            case "underline":
+                style = blinking ? .blinkUnderline : .steadyUnderline
+            case "bar":
+                style = blinking ? .blinkingBar : .steadyBar
+            default: // "block"
+                style = blinking ? .blinkBlock : .steadyBlock
+            }
+            setCursorStyle(style)
+        }
+        cursorBlink = blinking
+
         // restore cursor from state data; if a capture-pane follows,
         // tmuxCaptureInProgress will home cursor before rendering
         if let cx = int("cursor_x"), let cy = int("cursor_y") {
@@ -4637,7 +4679,7 @@ open class Terminal {
         }
 
 #if DEBUG
-        print("tmux: restored state: mouse=\(mouseMode)/\(mouseProtocol) alt=\(altOn) scroll=\(buffer.scrollTop)-\(buffer.scrollBottom) insert=\(insertMode) appCursor=\(applicationCursor) wrap=\(wraparound)")
+        print("tmux: restored state: mouse=\(mouseMode)/\(mouseProtocol) alt=\(altOn) origin=\(originMode) scroll=\(buffer.scrollTop)-\(buffer.scrollBottom) insert=\(insertMode) appCursor=\(applicationCursor) wrap=\(wraparound) cursorStyle=\(options.cursorStyle) cursorBlink=\(cursorBlink)")
 #endif
     }
 
