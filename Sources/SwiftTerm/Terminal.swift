@@ -1107,6 +1107,14 @@ open class Terminal {
             }
             // intercept capture-pane -peN content: home cursor and render
             if self.tmuxCaptureInProgress {
+                // clear scrollback from previous session — tmux manages its
+                // own scrollback, so our buffer should only hold the viewport
+                if self.buffer.yBase > 0 {
+                    self.buffer.lines.trimStart(count: self.buffer.yBase)
+                    self.buffer.yBase = 0
+                    self.buffer.yDisp = 0
+                    self.buffer.linesTop = 0
+                }
                 self.buffer.x = 0
                 self.buffer.y = 0
                 // strip trailing CR/LF to avoid scrolling past the last row
