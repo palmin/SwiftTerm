@@ -1098,6 +1098,8 @@ open class Terminal {
                         self.buffer.x = min(cx, self.cols - 1)
                         self.buffer.y = min(cy, self.rows - 1)
                         self.tmuxCaptureInProgress = false
+                        // reset curAttr so capture-pane SGR state doesn't leak
+                        self.curAttr = CharData.defaultAttr
 #if DEBUG
                         print("tmux: restored cursor=(\(self.buffer.x),\(self.buffer.y)) captureInProgress=false")
 #endif
@@ -1105,8 +1107,7 @@ open class Terminal {
                 }
                 return true
             }
-            // intercept capture-pane content: home cursor and strip trailing
-            // empty lines (unused pane area) before rendering
+            // intercept capture-pane -peN content: home cursor and render
             if self.tmuxCaptureInProgress {
                 // only home cursor on the first chunk; subsequent chunks
                 // continue from where the previous chunk left off
@@ -1116,17 +1117,7 @@ open class Terminal {
                     self.tmuxCaptureNeedsHome = false
                 }
 
-                // strip trailing empty lines (\r\n preceded by \n or at data start)
                 var data = Array(bytes)
-                var trimEnd = data.count
-                while trimEnd >= 2 && data[trimEnd - 1] == 10 && data[trimEnd - 2] == 13 {
-                    if trimEnd == 2 || data[trimEnd - 3] == 10 {
-                        trimEnd -= 2
-                    } else {
-                        break
-                    }
-                }
-                data = Array(data[..<trimEnd])
 
                 // replicate the parser's pending LF logic
                 if self.parser.tmuxBlockPendingLF {
@@ -1140,7 +1131,7 @@ open class Terminal {
                 }
                 if !data.isEmpty {
 #if DEBUG
-                    print("tmux: capture content \(data.count) bytes (trimmed from \(bytes.count))")
+                    print("tmux: capture content \(data.count) bytes")
 #endif
                     let _ = self.parser.parse2(data: data[...])
                 }
@@ -3082,6 +3073,17 @@ open class Terminal {
 
         print("--- colors ---")
         print("foreground: \(foregroundColor), background: \(backgroundColor)")
+        print("curAttr: fg=\(curAttr.fg), bg=\(curAttr.bg), style=\(curAttr.style)")
+
+        // sample cell attributes at a few key positions
+        print("--- cell attributes ---")
+        for row in [0, rows/2, rows - 1] {
+            for col in [0, cols - 1] {
+                if let cd = getCharData(col: col, row: row) {
+                    print("row[\(row)] col[\(col)]: fg=\(cd.attribute.fg), bg=\(cd.attribute.bg), style=\(cd.attribute.style), ch=\(cd.code == 0 ? "NUL" : String(cd.getCharacter()))")
+                }
+            }
+        }
 
         print("--- host info ---")
         print("hostCurrentDirectory: \(hostCurrentDirectory ?? "nil")")
