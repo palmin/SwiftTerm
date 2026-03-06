@@ -1075,6 +1075,8 @@ open class Terminal {
                         self.tmuxCaptureNeedsClear = false
                         // reset curAttr so capture-pane SGR state doesn't leak
                         self.curAttr = CharData.defaultAttr
+                        // signal that buffer content is ready for display
+                        self.tdel.bufferActivated(source: self)
 #if DEBUG
                         print("tmux: restored cursor=(\(self.buffer.x),\(self.buffer.y)) captureRemaining=0")
 #endif
