@@ -713,6 +713,7 @@ open class Terminal {
         parser.tmuxCommandMode = false
         parser.tmuxBlockIdentifier = nil
         parser.tmuxBlockContent.removeAll()
+        tmuxCaptureRemaining = 0
     }
 
     /// Non-nil when the parser is inside a %begin/%end block
@@ -720,136 +721,109 @@ open class Terminal {
         return parser.tmuxBlockIdentifier
     }
 
-    /// When true, the next non-intercepted block content will home the cursor
-    /// before rendering (used for capture-pane). Set by TerminalController
-    /// before sending capture-pane commands.
-    public var tmuxCaptureInProgress = false
+    /// Counts remaining capture-pane blocks to process (3=scrollback, 2=saved normal, 1=visible).
+    /// Set to 3 before sending the three capture-pane commands. SFCURSOR resets it to 0.
+    public var tmuxCaptureRemaining = 0
+    /// Whether we need to clear scrollback + home cursor before the first rendered capture phase
+    public var tmuxCaptureNeedsClear = false
+    /// Alternate mode flag from most recent SFSTATE, used by capture handler
+    public var tmuxStateAlternateOn = false
+    /// History size from most recent SFSTATE, used by capture handler
+    public var tmuxStateHistorySize = 0
     
-    func tmuxHandler(_ data: ArraySlice<UInt8>) -> [UInt8]? {
-        func decode(from offset: Int) -> [UInt8] {
-            var result = [UInt8]()
-            var index = offset
-            let endIndex = data.endIndex
-            while index < endIndex {
-                let c = data[index]
-                if c == 10 || c == 13 {
-                    // stop at newline
-                    break
-                }
-                if c == 92 && index + 4 < endIndex,
-                   let x = data[index+1].digit,
-                   let y = data[index+2].digit,
-                   let z = data[index+3].digit {
-                    
-                    // backslash has 3 octal digits
-                    let decoded = UInt8(clamping: x * 64 + y * 8 + z)
-                    result.append(decoded)
-                    index += 4
-                    continue
-                }
-                
-                result.append(c)
-                index += 1
+    /// decodes tmux octal-escaped bytes (\xxx) from raw notification params
+    private func tmuxDecodeOctal(_ data: ArraySlice<UInt8>) -> [UInt8] {
+        var result = [UInt8]()
+        var index = data.startIndex
+        let endIndex = data.endIndex
+        while index < endIndex {
+            let c = data[index]
+            if c == 92 && index + 3 < endIndex,
+               let x = data[index+1].digit,
+               let y = data[index+2].digit,
+               let z = data[index+3].digit {
+                result.append(UInt8(clamping: x * 64 + y * 8 + z))
+                index += 4
+                continue
             }
-            return result
+            result.append(c)
+            index += 1
         }
-        
-        if data.hasPrefix("%output ") {
-            // skip past pane identifier by looking for next space
-            guard let startOutput = data[(data.startIndex+8)...].firstIndex(of: 32) else {
-                return nil
-            }
+        return result
+    }
 
+    /// handles tmux %error block content
+    func tmuxCommandError(_ content: ArraySlice<UInt8>) {
 #if DEBUG
-            // log the pane identifier we receive data for
-            let paneIdBytes = [UInt8](data[(data.startIndex+8)..<startOutput])
-            let paneId = String(data: Data(paneIdBytes), encoding: .utf8) ?? "?"
-            print("tmux: %output pane=\(paneId) bytes=\(data.count - (startOutput + 1 - data.startIndex))")
-#endif
-
-            var replacement = decode(from: startOutput + 1)
-
-            // we fix tmux escaping of escape itself
-            replacement.replace("\u{1b}Ptmux;\u{1b}\u{1b}", "\u{1b}")
-
-#if false // verbose tmux debugging
-            print("tmux decoded \(data.asDebugString?.trimmed() ?? "") into \(replacement[...].asDebugString ?? "")")
-#endif
-            tmuxDelegate?.tmuxPaneOutput(source: self)
-            return replacement
+        if let msg = String(data: Data(content), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) {
+            print("tmux: command error: \(msg)")
         }
+#endif
+        // keep capture phase counter in sync when a capture command fails
+        if tmuxCaptureRemaining > 0 {
+            tmuxCaptureRemaining -= 1
+        }
+    }
 
-        if data.hasPrefix("%window-renamed ") {
-            // skip past window identifier by looking for next space
-            guard let startOutput = data[(data.startIndex+16)...].firstIndex(of: 32) else {
-                return []
+    /// handles all tmux notifications; name is without % prefix, params are raw bytes
+    func tmuxNotification(_ name: String, _ params: ArraySlice<UInt8>) {
+        switch name {
+        case "output":
+            // format: paneId encodedData
+            guard let spaceIdx = params.firstIndex(of: 32) else { return }
+#if DEBUG
+            let paneId = String(data: Data(params[params.startIndex..<spaceIdx]), encoding: .utf8) ?? "?"
+            print("tmux: %output pane=\(paneId) bytes=\(params.endIndex - spaceIdx - 1)")
+#endif
+            var decoded = tmuxDecodeOctal(params[(spaceIdx + 1)...])
+            decoded.replace("\u{1b}Ptmux;\u{1b}\u{1b}", "\u{1b}")
+            if !decoded.isEmpty {
+                let _ = parser.parse2(data: decoded[...])
             }
+            tmuxDelegate?.tmuxPaneOutput(source: self)
 
-            let titleBytes = decode(from: startOutput + 1)
+        case "window-renamed":
+            // format: windowId name
+            guard let spaceIdx = params.firstIndex(of: 32) else { return }
+            let windowId = String(data: Data(params[params.startIndex..<spaceIdx]), encoding: .utf8) ?? ""
+            let titleBytes = tmuxDecodeOctal(params[(spaceIdx + 1)...])
             if let title = String(data: Data(titleBytes), encoding: .utf8) {
-                setTitle (text: title)
-
-                // extract window id (between %window-renamed and the space before the name)
-                let windowIdBytes = [UInt8](data[(data.startIndex+16)..<startOutput])
-                let windowId = String(data: Data(windowIdBytes), encoding: .utf8) ?? ""
+                setTitle(text: title)
 #if DEBUG
                 print("tmux: %window-renamed window=\(windowId) title=\(title)")
 #endif
                 tmuxDelegate?.tmuxWindowRenamed(source: self, windowId: windowId, name: title)
             }
 
-            return []
-        }
-
-        if data.hasPrefix("%session-changed ") {
-            // format: %session-changed $sessionId $sessionName
-            let rest = data[(data.startIndex+17)...]
-            if let spaceIndex = rest.firstIndex(of: 32) {
-                let idBytes = [UInt8](rest[..<spaceIndex])
-                let nameBytes = decode(from: spaceIndex + 1)
-                let sessionId = String(data: Data(idBytes), encoding: .utf8) ?? ""
-                let sessionName = String(data: Data(nameBytes), encoding: .utf8) ?? ""
+        case "session-changed":
+            // format: sessionId sessionName
+            guard let spaceIdx = params.firstIndex(of: 32) else { return }
+            let sessionId = String(data: Data(params[params.startIndex..<spaceIdx]), encoding: .utf8) ?? ""
+            let nameBytes = tmuxDecodeOctal(params[(spaceIdx + 1)...])
+            let sessionName = String(data: Data(nameBytes), encoding: .utf8) ?? ""
 #if DEBUG
-                print("tmux: %session-changed id=\(sessionId) name=\(sessionName)")
+            print("tmux: %session-changed id=\(sessionId) name=\(sessionName)")
 #endif
-                tmuxDelegate?.tmuxSessionChanged(source: self, sessionId: sessionId, sessionName: sessionName)
-            }
-            return []
-        }
+            tmuxDelegate?.tmuxSessionChanged(source: self, sessionId: sessionId, sessionName: sessionName)
 
-        if data.hasPrefix("%layout-change") || data.hasPrefix("%window-add") ||
-           data.hasPrefix("%window-close") || data.hasPrefix("%unlinked-window") ||
-           data.hasPrefix("%sessions-changed") || data.hasPrefix("%pause") ||
-           data.hasPrefix("%continue") {
-            // known notifications we can safely ignore in single-session mode
-            return []
-        }
-
-        if data.hasPrefix("%alert-bell") {
-            self.tdel.bell (source: self)
-            return []
-        }
-
-        if data.hasPrefix("%exit") && data.count >= 6 {
+        case "exit":
 #if DEBUG
             print("tmux: %exit received")
 #endif
+            parser.tmuxCommandMode = false
+            tmuxDelegate?.tmuxModeEnded(source: self)
 
-            let next = data[data.startIndex+5]
-            if next == 10 || next == 13 {
-                parser.tmuxCommandMode = false
-                tmuxDelegate?.tmuxModeEnded(source: self)
-                return []
-            }
-        }
+        case "alert-bell":
+            tdel.bell(source: self)
 
+        default:
 #if DEBUG
-        // log any unhandled tmux notification
-        if let line = String(data: Data(data), encoding: .utf8) {
-            print("tmux: unhandled: \(line.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
+            if let line = String(data: Data(params), encoding: .utf8) {
+                print("tmux: %\(name) \(line)")
+            }
 #endif
-        return []
+            break
+        }
     }
 
     // Configures the EscapeSequenceParser
@@ -1073,11 +1047,13 @@ open class Terminal {
             }
         }
         
-        // tmux command mode
-        parser.tmuxCommandHandler = { [weak self] bytes in
-            return self?.tmuxHandler(bytes)
+        // tmux command mode handlers
+        parser.tmuxNotificationHandler = { [weak self] name, params in
+            self?.tmuxNotification(name, params)
         }
-        // called once per block with complete content between %begin and %end
+        parser.tmuxCommandErrorHandler = { [weak self] content in
+            self?.tmuxCommandError(content)
+        }
         parser.tmuxBlockContentHandler = { [weak self] bytes in
             guard let self = self else { return false }
 
@@ -1095,39 +1071,99 @@ open class Terminal {
                     if parts.count == 2, let cx = Int(parts[0]), let cy = Int(parts[1]) {
                         self.buffer.x = min(cx, self.cols - 1)
                         self.buffer.y = min(cy, self.rows - 1)
-                        self.tmuxCaptureInProgress = false
+                        self.tmuxCaptureRemaining = 0
+                        self.tmuxCaptureNeedsClear = false
                         // reset curAttr so capture-pane SGR state doesn't leak
                         self.curAttr = CharData.defaultAttr
 #if DEBUG
-                        print("tmux: restored cursor=(\(self.buffer.x),\(self.buffer.y)) captureInProgress=false")
+                        print("tmux: restored cursor=(\(self.buffer.x),\(self.buffer.y)) captureRemaining=0")
 #endif
                     }
                 }
                 return true
             }
-            // intercept capture-pane -peN content: home cursor and render
-            if self.tmuxCaptureInProgress {
-                // clear scrollback from previous session — tmux manages its
-                // own scrollback, so our buffer should only hold the viewport
-                if self.buffer.yBase > 0 {
-                    self.buffer.lines.trimStart(count: self.buffer.yBase)
-                    self.buffer.yBase = 0
-                    self.buffer.yDisp = 0
-                    self.buffer.linesTop = 0
-                }
-                self.buffer.x = 0
-                self.buffer.y = 0
+            // intercept capture-pane content: three-phase rendering
+            // phase 3→2: scrollback, phase 2→1: saved normal, phase 1→0: visible
+            if self.tmuxCaptureRemaining > 0 {
+                let phase = self.tmuxCaptureRemaining
+                self.tmuxCaptureRemaining -= 1
+
                 // strip trailing CR/LF to avoid scrolling past the last row
                 var trimmed = bytes
                 while let last = trimmed.last, last == 10 || last == 13 {
                     trimmed = trimmed.dropLast()
                 }
 #if DEBUG
-                print("tmux: capture content \(bytes.count) bytes (\(trimmed.count) trimmed)")
+                print("tmux: capture phase \(phase)→\(phase-1) \(bytes.count) bytes (\(trimmed.count) trimmed) alt=\(self.tmuxStateAlternateOn) hsize=\(self.tmuxStateHistorySize)")
 #endif
-                if !trimmed.isEmpty {
-                    let _ = self.parser.parse2(data: trimmed)
+                switch phase {
+                case 3: // scrollback (capture-pane -peN -S - -E -1)
+                    if self.tmuxStateHistorySize > 0 {
+                        // clear old scrollback and home cursor
+                        if self.buffer.yBase > 0 {
+                            self.buffer.lines.trimStart(count: self.buffer.yBase)
+                            self.buffer.yBase = 0
+                            self.buffer.yDisp = 0
+                            self.buffer.linesTop = 0
+                        }
+                        self.buffer.x = 0
+                        self.buffer.y = 0
+                        self.tmuxCaptureNeedsClear = false
+                        if !trimmed.isEmpty {
+                            let _ = self.parser.parse2(data: trimmed)
+                        }
+                    }
+                    // when history_size==0 this captures one garbage line — skip it
+
+                case 2: // saved normal visible (capture-pane -apeNq)
+                    if self.tmuxStateAlternateOn && !trimmed.isEmpty {
+                        if self.tmuxCaptureNeedsClear {
+                            if self.buffer.yBase > 0 {
+                                self.buffer.lines.trimStart(count: self.buffer.yBase)
+                                self.buffer.yBase = 0
+                                self.buffer.yDisp = 0
+                                self.buffer.linesTop = 0
+                            }
+                            self.buffer.x = 0
+                            self.buffer.y = 0
+                            self.tmuxCaptureNeedsClear = false
+                        }
+                        let _ = self.parser.parse2(data: trimmed)
+                    }
+                    // when not in alt mode, -apeNq returns empty — skip
+
+                case 1: // visible content (capture-pane -peN)
+                    if self.tmuxStateAlternateOn {
+                        // switch to alt buffer and render alt content
+                        self.buffers!.activateAltBuffer(fillAttr: nil)
+                        self.tdel.bufferActivated(source: self)
+                        self.buffer.x = 0
+                        self.buffer.y = 0
+                        if !trimmed.isEmpty {
+                            let _ = self.parser.parse2(data: trimmed)
+                        }
+                    } else {
+                        // normal mode: clear if scrollback phase was skipped
+                        if self.tmuxCaptureNeedsClear {
+                            if self.buffer.yBase > 0 {
+                                self.buffer.lines.trimStart(count: self.buffer.yBase)
+                                self.buffer.yBase = 0
+                                self.buffer.yDisp = 0
+                                self.buffer.linesTop = 0
+                            }
+                            self.buffer.x = 0
+                            self.buffer.y = 0
+                            self.tmuxCaptureNeedsClear = false
+                        }
+                        if !trimmed.isEmpty {
+                            let _ = self.parser.parse2(data: trimmed)
+                        }
+                    }
+
+                default:
+                    break
                 }
+
                 return true
             }
             return false
@@ -4626,9 +4662,17 @@ open class Terminal {
         // alternate screen
         let altOn = flag("alternate_on")
         let isAlt = buffers!.isAlternateBuffer
+        // store for capture handler phases
+        tmuxStateAlternateOn = altOn
+        tmuxStateHistorySize = int("history_size") ?? 0
         if altOn && !isAlt {
-            buffers!.activateAltBuffer(fillAttr: nil)
-            tdel.bufferActivated(source: self)
+            if tmuxCaptureRemaining > 0 {
+                // defer alt switch — capture handler phase 1 will activate alt
+                // after rendering scrollback + saved normal into the normal buffer
+            } else {
+                buffers!.activateAltBuffer(fillAttr: nil)
+                tdel.bufferActivated(source: self)
+            }
         } else if !altOn && isAlt {
             buffers!.activateNormalBuffer(clearAlt: false)
             tdel.bufferActivated(source: self)
@@ -4675,15 +4719,15 @@ open class Terminal {
             cursorBlink = blinking
         }
 
-        // restore cursor from state data; if a capture-pane follows,
-        // tmuxCaptureInProgress will home cursor before rendering
+        // restore cursor from state data; if captures follow,
+        // tmuxCaptureRemaining will guide phase-based rendering
         if let cx = int("cursor_x"), let cy = int("cursor_y") {
             buffer.x = min(cx, cols - 1)
             buffer.y = min(cy, rows - 1)
         }
 
 #if DEBUG
-        print("tmux: restored state: mouse=\(mouseMode)/\(mouseProtocol) alt=\(altOn) origin=\(originMode) scroll=\(buffer.scrollTop)-\(buffer.scrollBottom) insert=\(insertMode) appCursor=\(applicationCursor) wrap=\(wraparound) cursorStyle=\(options.cursorStyle) cursorBlink=\(cursorBlink)")
+        print("tmux: restored state: mouse=\(mouseMode)/\(mouseProtocol) alt=\(altOn) hsize=\(tmuxStateHistorySize) origin=\(originMode) scroll=\(buffer.scrollTop)-\(buffer.scrollBottom) insert=\(insertMode) appCursor=\(applicationCursor) wrap=\(wraparound) cursorStyle=\(options.cursorStyle) cursorBlink=\(cursorBlink) captureRemaining=\(tmuxCaptureRemaining)")
 #endif
     }
 

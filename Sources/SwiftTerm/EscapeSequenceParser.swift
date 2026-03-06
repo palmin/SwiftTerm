@@ -361,13 +361,19 @@ class EscapeSequenceParser {
     
     var dscHandlerFallback: DscHandlerFallback = { code, pars in }
     
-    // TmuxCommandHandler return value is what should replace the input
-    typealias TmuxCommandHandler = (ArraySlice<UInt8>) -> ([UInt8]?)
-    var tmuxCommandHandler: TmuxCommandHandler = { _ in nil }
-
-    // called for each line inside a %begin/%end block; return true to consume (skip parse2)
+    // called when a %begin..%end block completes; return true to consume (skip parse2)
     typealias TmuxBlockContentHandler = (ArraySlice<UInt8>) -> Bool
     var tmuxBlockContentHandler: TmuxBlockContentHandler = { _ in false }
+
+    // called when a %begin..%error block completes with the error content
+    typealias TmuxCommandErrorHandler = (ArraySlice<UInt8>) -> Void
+    var tmuxCommandErrorHandler: TmuxCommandErrorHandler = { _ in }
+
+    // called for any tmux notification (everything except %begin/%end/%error);
+    // name is the notification without % prefix (e.g. "output", "exit"),
+    // params is the raw bytes after the name (may be empty)
+    typealias TmuxNotificationHandler = (_ name: String, _ params: ArraySlice<UInt8>) -> Void
+    var tmuxNotificationHandler: TmuxNotificationHandler = { _, _ in }
 
     var executeHandlerFallback : ExecuteHandler = { () -> () in
     }
@@ -489,32 +495,36 @@ class EscapeSequenceParser {
                 data = data[i...]
 
                 if let identifier = tmuxBlockIdentifier {
-                    // only the correct %end/%error commands can satisfy us
-                    if bytes.hasPrefix("%end \(identifier)") ||
-                       bytes.hasPrefix("%error \(identifier)") {
+                    // inside a block — only %end/%error with matching identifier can close it
+                    if bytes.hasPrefix("%end \(identifier)") {
 #if DEBUG
-                        let kind = bytes.hasPrefix("%error") ? "error" : "end"
-                        print("tmux: block \(kind) [\(identifier)]")
+                        print("tmux: block end [\(identifier)]")
 #endif
                         let content = tmuxBlockContent
                         tmuxBlockIdentifier = nil
                         tmuxBlockContent.removeAll()
 
-                        // deliver complete block content to handler
                         if !content.isEmpty && !tmuxBlockContentHandler(content[...]) {
                             // not consumed — render as terminal content
-                            // strip trailing CR/LF (the newline before %end)
                             var toRender = content
                             while toRender.last == 10 || toRender.last == 13 {
                                 toRender.removeLast()
                             }
                             if !toRender.isEmpty {
 #if DEBUG
-                                print("tmux: block content \(toRender.count) bytes")
+                                print("tmux: block content \(toRender.count) bytes rendered")
 #endif
                                 let _ = parse2(data: toRender[...])
                             }
                         }
+                    } else if bytes.hasPrefix("%error \(identifier)") {
+#if DEBUG
+                        print("tmux: block error [\(identifier)]")
+#endif
+                        let content = tmuxBlockContent
+                        tmuxBlockIdentifier = nil
+                        tmuxBlockContent.removeAll()
+                        tmuxCommandErrorHandler(content[...])
                     } else {
                         // accumulate line into block buffer
                         tmuxBlockContent.append(contentsOf: bytes)
@@ -523,12 +533,10 @@ class EscapeSequenceParser {
                     continue
                 }
 
-                // check if we started multiline response
+                // check if we started a new block
                 if bytes.hasPrefix("%begin ") {
                     // format: %begin timestamp commandNumber flags
-                    // we store "timestamp commandNumber" to match %end/%error
                     let postfix = bytes.dropFirst(7)
-                    // find end of line (strip CR/LF)
                     var lineEnd = postfix.endIndex
                     for j in postfix.startIndex..<postfix.endIndex {
                         if postfix[j] == 10 || postfix[j] == 13 {
@@ -545,10 +553,24 @@ class EscapeSequenceParser {
                         continue
                     }
                 }
-                
-                // use decoded data
-                if let decoded = tmuxCommandHandler(bytes), !decoded.isEmpty {
-                    let _ = parse2(data: decoded[...])
+
+                // everything else is a notification — extract name and params
+                // format: %name [params...]\r\n
+                // strip the leading % and trailing CR/LF
+                var lineBytes = bytes.dropFirst() // skip %
+                while let last = lineBytes.last, last == 10 || last == 13 {
+                    lineBytes = lineBytes.dropLast()
+                }
+                // split at first space: name params
+                if let spaceIdx = lineBytes.firstIndex(of: 32) {
+                    let nameBytes = lineBytes[lineBytes.startIndex..<spaceIdx]
+                    let params = lineBytes[(spaceIdx + 1)...]
+                    if let name = String(data: Data(nameBytes), encoding: .utf8) {
+                        tmuxNotificationHandler(name, params)
+                    }
+                } else if let name = String(data: Data(lineBytes), encoding: .utf8), !name.isEmpty {
+                    // notification with no params (e.g. %sessions-changed)
+                    tmuxNotificationHandler(name, lineBytes[lineBytes.endIndex...])
                 }
                 
             } else {
