@@ -773,8 +773,18 @@ open class Terminal {
             guard let spaceIdx = params.firstIndex(of: 32) else { return }
 #if DEBUG
             let paneId = String(data: Data(params[params.startIndex..<spaceIdx]), encoding: .utf8) ?? "?"
-            print("tmux: %output pane=\(paneId) bytes=\(params.endIndex - spaceIdx - 1)")
+            print("tmux: %output pane=\(paneId) bytes=\(params.endIndex - spaceIdx - 1) captureRemaining=\(tmuxCaptureRemaining)")
 #endif
+            // suppress %output while capture-pane responses are pending;
+            // the captures will provide the full pane content and any
+            // %output arriving during the transition would write stale
+            // data from the old pane into the freshly-cleared buffer
+            if tmuxCaptureRemaining > 0 {
+#if DEBUG
+                print("tmux: %output suppressed (capture in progress)")
+#endif
+                break
+            }
             var decoded = tmuxDecodeOctal(params[(spaceIdx + 1)...])
             decoded.replace("\u{1b}Ptmux;\u{1b}\u{1b}", "\u{1b}")
             if !decoded.isEmpty {
@@ -1096,23 +1106,41 @@ open class Terminal {
                     trimmed = trimmed.dropLast()
                 }
 #if DEBUG
-                print("tmux: capture phase \(phase)→\(phase-1) \(bytes.count) bytes (\(trimmed.count) trimmed) alt=\(self.tmuxStateAlternateOn) hsize=\(self.tmuxStateHistorySize)")
+                print("tmux: capture phase \(phase)→\(phase-1) \(bytes.count) bytes (\(trimmed.count) trimmed) alt=\(self.tmuxStateAlternateOn) hsize=\(self.tmuxStateHistorySize) needsClear=\(self.tmuxCaptureNeedsClear) yBase=\(self.buffer.yBase) rows=\(self.rows)")
+                // log non-blank lines in visible area to detect stale content
+                var nonBlankCount = 0
+                for row in 0..<self.rows {
+                    let line = self.buffer.lines[self.buffer.yBase + row]
+                    if line.hasAnyContent() {
+                        nonBlankCount += 1
+                    }
+                }
+                print("tmux: capture phase \(phase) pre-render: \(nonBlankCount)/\(self.rows) non-blank visible lines")
 #endif
                 switch phase {
                 case 3: // scrollback (capture-pane -peN -S - -E -1)
                     if self.tmuxStateHistorySize > 0 {
-                        // clear old scrollback and home cursor
-                        if self.buffer.yBase > 0 {
-                            self.buffer.lines.trimStart(count: self.buffer.yBase)
-                            self.buffer.yBase = 0
-                            self.buffer.yDisp = 0
-                            self.buffer.linesTop = 0
-                        }
-                        self.buffer.x = 0
-                        self.buffer.y = 0
+                        // clear buffer so scrollback starts clean
+                        self.buffer.clear()
+                        self.buffer.fillViewportRows()
                         self.tmuxCaptureNeedsClear = false
                         if !trimmed.isEmpty {
                             let _ = self.parser.parse2(data: trimmed)
+                            // push rendered scrollback into history so it doesn't
+                            // occupy the visible area when phase 1 renders
+                            let scrollbackRows = self.buffer.x > 0
+                                ? self.buffer.y + 1 : max(self.buffer.y, 0)
+                            if scrollbackRows > 0 {
+                                let blank = self.buffer.getBlankLine(
+                                    attribute: CharData.defaultAttr)
+                                for _ in 0..<scrollbackRows {
+                                    self.buffer.lines.push(BufferLine(from: blank))
+                                }
+                                self.buffer.yBase += scrollbackRows
+                                self.buffer.yDisp += scrollbackRows
+                                self.buffer.x = 0
+                                self.buffer.y = 0
+                            }
                         }
                     }
                     // when history_size==0 this captures one garbage line — skip it
@@ -1120,14 +1148,8 @@ open class Terminal {
                 case 2: // saved normal visible (capture-pane -apeNq)
                     if self.tmuxStateAlternateOn && !trimmed.isEmpty {
                         if self.tmuxCaptureNeedsClear {
-                            if self.buffer.yBase > 0 {
-                                self.buffer.lines.trimStart(count: self.buffer.yBase)
-                                self.buffer.yBase = 0
-                                self.buffer.yDisp = 0
-                                self.buffer.linesTop = 0
-                            }
-                            self.buffer.x = 0
-                            self.buffer.y = 0
+                            self.buffer.clear()
+                            self.buffer.fillViewportRows()
                             self.tmuxCaptureNeedsClear = false
                         }
                         let _ = self.parser.parse2(data: trimmed)
@@ -1145,21 +1167,40 @@ open class Terminal {
                             let _ = self.parser.parse2(data: trimmed)
                         }
                     } else {
-                        // normal mode: clear if scrollback phase was skipped
+                        // normal mode: clear visible rows preserving scrollback
+                        // history, so stale content from phase 3 or previous
+                        // session doesn't show below new content
                         if self.tmuxCaptureNeedsClear {
-                            if self.buffer.yBase > 0 {
-                                self.buffer.lines.trimStart(count: self.buffer.yBase)
-                                self.buffer.yBase = 0
-                                self.buffer.yDisp = 0
-                                self.buffer.linesTop = 0
+#if DEBUG
+                            print("tmux: phase 1 full clear: yBase=\(self.buffer.yBase)")
+#endif
+                            self.buffer.clear()
+                            self.buffer.fillViewportRows()
+                        } else {
+                            let blank = self.buffer.getBlankLine(
+                                attribute: CharData.defaultAttr)
+                            for row in 0..<self.rows {
+                                self.buffer.lines[self.buffer.yBase + row] =
+                                    BufferLine(from: blank)
                             }
-                            self.buffer.x = 0
-                            self.buffer.y = 0
-                            self.tmuxCaptureNeedsClear = false
                         }
+                        self.tmuxCaptureNeedsClear = false
+                        self.buffer.x = 0
+                        self.buffer.y = 0
                         if !trimmed.isEmpty {
                             let _ = self.parser.parse2(data: trimmed)
                         }
+#if DEBUG
+                        // log visible area after render
+                        var postNonBlank = 0
+                        for row in 0..<self.rows {
+                            let line = self.buffer.lines[self.buffer.yBase + row]
+                            if line.hasAnyContent() {
+                                postNonBlank += 1
+                            }
+                        }
+                        print("tmux: phase 1 post-render: \(postNonBlank)/\(self.rows) non-blank, cursor=(\(self.buffer.x),\(self.buffer.y))")
+#endif
                     }
 
                 default:
@@ -4580,7 +4621,7 @@ open class Terminal {
     public func resetToInitialState ()
     {
 #if DEBUG
-        print("tmux: resetToInitialState called")
+        print("tmux: resetToInitialState called yBase=\(buffer.yBase) lines=\(buffer.lines.count)")
 #endif
         options.rows = rows
         options.cols = cols
@@ -4589,6 +4630,9 @@ open class Terminal {
         cursorHidden = savedCursorHidden
         refresh (startRow: 0, endRow: rows-1)
         syncScrollArea ()
+#if DEBUG
+        print("tmux: resetToInitialState done yBase=\(buffer.yBase) lines=\(buffer.lines.count)")
+#endif
     }
 
     // extracts state string from SFSTATE:...:SFSTATE envelope and restores
