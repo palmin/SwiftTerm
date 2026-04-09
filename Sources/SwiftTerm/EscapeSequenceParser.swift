@@ -498,13 +498,21 @@ class EscapeSequenceParser {
                     // inside a block — only %end/%error with matching identifier can close it
                     if bytes.hasPrefix("%end \(identifier)") {
 #if DEBUG
-                        print("tmux: block end [\(identifier)]")
+                        print("tmux: block end [\(identifier)] contentBytes=\(tmuxBlockContent.count)")
 #endif
                         let content = tmuxBlockContent
                         tmuxBlockIdentifier = nil
                         tmuxBlockContent.removeAll()
 
-                        if !content.isEmpty && !tmuxBlockContentHandler(content[...]) {
+                        // always call the handler, even on empty blocks, so
+                        // phased capture state can advance when a capture-pane
+                        // command legitimately returns nothing (e.g. -apeNq
+                        // when the pane isn't in alt mode). the handler is
+                        // responsible for ignoring empty blocks outside of an
+                        // active capture window
+                        let consumed = tmuxBlockContentHandler(content[...])
+
+                        if !consumed && !content.isEmpty {
                             // not consumed — render as terminal content
                             var toRender = content
                             while toRender.last == 10 || toRender.last == 13 {

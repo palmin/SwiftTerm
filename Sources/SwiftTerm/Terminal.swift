@@ -4642,6 +4642,18 @@ open class Terminal {
         if let state = String(data: Data(trimmed), encoding: .utf8) {
             restoreTmuxState(from: state)
         }
+        // SFSTATE marks the beginning of the three-phase capture window: the
+        // next three block-content callbacks are scrollback (3), saved normal
+        // (2), and visible (1). Arming here (instead of before the commands
+        // are sent) ensures empty replies to non-capture commands like
+        // switch-client and refresh-client don't falsely decrement the phase
+        // counter, and empty capture replies (e.g. -apeNq in normal mode)
+        // still advance it correctly
+        tmuxCaptureRemaining = 3
+        tmuxCaptureNeedsClear = true
+#if DEBUG
+        print("tmux: SFSTATE armed captureRemaining=3")
+#endif
     }
 
     /// Restores terminal state from tmux pane flags (queried via display-message).
