@@ -4644,8 +4644,9 @@ open class Terminal {
     func processSFSTATE(_ bytes: ArraySlice<UInt8>) {
         let payload = bytes.dropFirst(8) // strip "SFSTATE:" prefix
         let trimmed = payload.prefix(while: { $0 != 10 && $0 != 13 })
+        let isCapture = tmuxCaptureExpected
         if let state = String(data: Data(trimmed), encoding: .utf8) {
-            restoreTmuxState(from: state)
+            restoreTmuxState(from: state, fullRestore: isCapture)
         }
         // only arm capture phases when capture-pane commands were actually
         // sent alongside this SFSTATE query; standalone state queries (e.g.
@@ -4666,7 +4667,10 @@ open class Terminal {
 
     /// Restores terminal state from tmux pane flags (queried via display-message).
     /// The input is tab-separated key=value pairs matching tmux format variables.
-    public func restoreTmuxState(from state: String) {
+    /// When fullRestore is false (standalone query), input-encoding modes like
+    /// keypad are skipped since %output already tracks them in real-time and
+    /// standalone queries can catch transient states during resize.
+    public func restoreTmuxState(from state: String, fullRestore: Bool = true) {
 #if DEBUG
         print("tmux: pre-restore cursor=(\(buffer.x),\(buffer.y)) scrollRegion=\(buffer.scrollTop)-\(buffer.scrollBottom) rows=\(rows) alt=\(buffers!.isAlternateBuffer)")
 #endif
@@ -4707,11 +4711,16 @@ open class Terminal {
         // insert mode
         if let v = dict["insert_flag"] { insertMode = v == "1" }
 
-        // application cursor keys (DECCKM)
-        if let v = dict["keypad_cursor_flag"] { applicationCursor = v == "1" }
+        // input-encoding modes: only restore during full (capture-based) restores
+        // since %output already tracks these in real-time and standalone queries
+        // can catch transient states (e.g. mc sends DECKPAM during resize)
+        if fullRestore {
+            // application cursor keys (DECCKM)
+            if let v = dict["keypad_cursor_flag"] { applicationCursor = v == "1" }
 
-        // application keypad
-        if let v = dict["keypad_flag"] { applicationKeypad = v == "1" }
+            // application keypad
+            if let v = dict["keypad_flag"] { applicationKeypad = v == "1" }
+        }
 
         // wraparound mode
         if let v = dict["wrap_flag"] { wraparound = v == "1" }
