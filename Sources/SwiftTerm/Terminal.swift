@@ -714,6 +714,7 @@ open class Terminal {
         parser.tmuxBlockIdentifier = nil
         parser.tmuxBlockContent.removeAll()
         tmuxCaptureRemaining = 0
+        tmuxCaptureExpected = false
     }
 
     /// Non-nil when the parser is inside a %begin/%end block
@@ -726,6 +727,10 @@ open class Terminal {
     public var tmuxCaptureRemaining = 0
     /// Whether we need to clear scrollback + home cursor before the first rendered capture phase
     public var tmuxCaptureNeedsClear = false
+    /// Set to true before sending SFSTATE + capture-pane commands together;
+    /// SFSTATE only arms captureRemaining when this is true, preventing
+    /// standalone state queries from suppressing %output
+    public var tmuxCaptureExpected = false
     /// Alternate mode flag from most recent SFSTATE, used by capture handler
     public var tmuxStateAlternateOn = false
     /// History size from most recent SFSTATE, used by capture handler
@@ -4642,18 +4647,21 @@ open class Terminal {
         if let state = String(data: Data(trimmed), encoding: .utf8) {
             restoreTmuxState(from: state)
         }
-        // SFSTATE marks the beginning of the three-phase capture window: the
-        // next three block-content callbacks are scrollback (3), saved normal
-        // (2), and visible (1). Arming here (instead of before the commands
-        // are sent) ensures empty replies to non-capture commands like
-        // switch-client and refresh-client don't falsely decrement the phase
-        // counter, and empty capture replies (e.g. -apeNq in normal mode)
-        // still advance it correctly
-        tmuxCaptureRemaining = 3
-        tmuxCaptureNeedsClear = true
+        // only arm capture phases when capture-pane commands were actually
+        // sent alongside this SFSTATE query; standalone state queries (e.g.
+        // from onTmuxPaneOutput) must not suppress %output
+        if tmuxCaptureExpected {
+            tmuxCaptureExpected = false
+            tmuxCaptureRemaining = 3
+            tmuxCaptureNeedsClear = true
 #if DEBUG
-        print("tmux: SFSTATE armed captureRemaining=3")
+            print("tmux: SFSTATE armed captureRemaining=3")
 #endif
+        } else {
+#if DEBUG
+            print("tmux: SFSTATE standalone (no capture armed)")
+#endif
+        }
     }
 
     /// Restores terminal state from tmux pane flags (queried via display-message).
@@ -4777,6 +4785,11 @@ open class Terminal {
             cursorBlink = blinking
         }
 
+        // bracketed paste mode (tmux 3.x+)
+        if dict["bracket_paste_flag"] != nil {
+            bracketedPasteMode = flag("bracket_paste_flag")
+        }
+
         // restore cursor from state data; if captures follow,
         // tmuxCaptureRemaining will guide phase-based rendering
         if let cx = int("cursor_x"), let cy = int("cursor_y") {
@@ -4785,7 +4798,7 @@ open class Terminal {
         }
 
 #if DEBUG
-        print("tmux: restored state: mouse=\(mouseMode)/\(mouseProtocol) alt=\(altOn) hsize=\(tmuxStateHistorySize) origin=\(originMode) scroll=\(buffer.scrollTop)-\(buffer.scrollBottom) insert=\(insertMode) appCursor=\(applicationCursor) wrap=\(wraparound) cursorStyle=\(options.cursorStyle) cursorBlink=\(cursorBlink) captureRemaining=\(tmuxCaptureRemaining)")
+        print("tmux: restored state: mouse=\(mouseMode)/\(mouseProtocol) alt=\(altOn) hsize=\(tmuxStateHistorySize) origin=\(originMode) scroll=\(buffer.scrollTop)-\(buffer.scrollBottom) insert=\(insertMode) appCursor=\(applicationCursor) wrap=\(wraparound) bracketedPaste=\(bracketedPasteMode) cursorStyle=\(options.cursorStyle) cursorBlink=\(cursorBlink) captureRemaining=\(tmuxCaptureRemaining)")
 #endif
     }
 
