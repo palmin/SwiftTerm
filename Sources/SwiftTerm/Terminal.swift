@@ -3184,6 +3184,23 @@ open class Terminal {
         }
         print("========================================")
     }
+
+    /// checks whether the last visible row has non-blank content,
+    /// returns the content of the last row (trimmed) for logging
+    public func lastRowContent() -> String {
+        let lastRow = buffer.yBase + rows - 1
+        guard lastRow < buffer.lines.count else { return "" }
+        let line = buffer.lines[lastRow]
+        var result = ""
+        for col in 0..<cols {
+            let ch = line[col]
+            let c = ch.getCharacter()
+            if c != "\u{0}" {
+                result.append(c == " " ? " " : c)
+            }
+        }
+        return result.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+    }
 #endif
 
     //
