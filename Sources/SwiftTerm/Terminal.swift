@@ -3219,15 +3219,11 @@ open class Terminal {
     /// checks whether the last visible row has non-blank content,
     /// returns the content of the last row (trimmed) for logging
     public func lastRowContent() -> String {
-        let lastRow = buffer.yBase + rows - 1
-        guard lastRow < buffer.lines.count else { return "" }
-        let line = buffer.lines[lastRow]
+        let lastRow = rows - 1
         var result = ""
         for col in 0..<cols {
-            let ch = line[col]
-            let c = ch.getCharacter()
-            if c != "\u{0}" {
-                result.append(c == " " ? " " : c)
+            if let c = getCharacter(col: col, row: lastRow) {
+                result.append(c)
             }
         }
         return result.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
@@ -4701,10 +4697,16 @@ open class Terminal {
         // from onTmuxPaneOutput) must not suppress %output
         if tmuxCaptureExpected {
             tmuxCaptureExpected = false
+            // switch to normal buffer so capture phases 3 (scrollback) and 2
+            // (saved normal) render into the normal buffer; phase 1 will
+            // activate alt buffer if needed
+            if buffers!.isAlternateBuffer {
+                buffers!.activateNormalBuffer(clearAlt: false)
+            }
             tmuxCaptureRemaining = 3
             tmuxCaptureNeedsClear = true
 #if DEBUG
-            print("tmux: SFSTATE armed captureRemaining=3")
+            print("tmux: SFSTATE armed captureRemaining=3 (switched to normal buffer)")
 #endif
         } else {
 #if DEBUG
