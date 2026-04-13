@@ -715,6 +715,7 @@ open class Terminal {
         parser.tmuxBlockContent.removeAll()
         tmuxCaptureRemaining = 0
         tmuxCaptureExpected = false
+        tmuxResizePending = 0
     }
 
     /// Non-nil when the parser is inside a %begin/%end block
@@ -731,6 +732,11 @@ open class Terminal {
     /// SFSTATE only arms captureRemaining when this is true, preventing
     /// standalone state queries from suppressing %output
     public var tmuxCaptureExpected = false
+    /// Number of pending tmux commands whose %end we're waiting for before
+    /// sending capture-pane. Set when refresh-client -C is sent; decremented
+    /// on each empty %end block. When it reaches 0, the delegate is notified
+    /// that the resize round-trip is complete and captures can be sent.
+    public var tmuxResizePending = 0
     /// Alternate mode flag from most recent SFSTATE, used by capture handler
     public var tmuxStateAlternateOn = false
     /// History size from most recent SFSTATE, used by capture handler
@@ -1072,6 +1078,18 @@ open class Terminal {
         parser.tmuxBlockContentHandler = { [weak self] bytes in
             guard let self = self else { return false }
 
+            // track pending resize commands; when all have completed
+            // (their %end arrived), notify delegate that captures can be sent
+            if self.tmuxResizePending > 0 {
+                self.tmuxResizePending -= 1
+#if DEBUG
+                print("tmux: resize pending \(self.tmuxResizePending + 1)→\(self.tmuxResizePending)")
+#endif
+                if self.tmuxResizePending == 0 {
+                    self.tmuxDelegate?.tmuxResizeCompleted(source: self)
+                }
+            }
+
             // intercept SFSTATE: pane state query response
             if bytes.hasPrefix("SFSTATE:") {
                 self.processSFSTATE(bytes)
@@ -1171,6 +1189,15 @@ open class Terminal {
                         if !trimmed.isEmpty {
                             let _ = self.parser.parse2(data: trimmed)
                         }
+#if DEBUG
+                        var altNonBlank = 0
+                        for row in 0..<self.rows {
+                            if self.buffer.lines[self.buffer.yBase + row].hasAnyContent() {
+                                altNonBlank += 1
+                            }
+                        }
+                        print("tmux: phase 1 alt post-render: \(altNonBlank)/\(self.rows) non-blank, cursor=(\(self.buffer.x),\(self.buffer.y)) yBase=\(self.buffer.yBase)")
+#endif
                     } else {
                         // normal mode: clear visible rows preserving scrollback
                         // history, so stale content from phase 3 or previous
@@ -3183,6 +3210,10 @@ open class Terminal {
             print("[\(String(format: "%02d", row))] \(trimmed)")
         }
         print("========================================")
+        // check if mc's F-key bar is on the last row
+        let lastContent = lastRowContent()
+        let mcFills = lastContent.contains("Help") || lastContent.contains("Menu")
+        print("mc fills terminal: \(mcFills ? "YES" : "NO") — last row: '\(lastContent.prefix(60))'")
     }
 
     /// checks whether the last visible row has non-blank content,
@@ -5352,10 +5383,15 @@ public protocol TerminalTmuxDelegate: AnyObject {
     func tmuxWindowRenamed(source: Terminal, windowId: String, name: String)
     /// called when %output data has been processed for a pane
     func tmuxPaneOutput(source: Terminal)
+    /// called when all pending resize commands have completed (their %end
+    /// blocks arrived); the client can now send capture-pane knowing the
+    /// pane has been resized and SIGWINCH has been delivered
+    func tmuxResizeCompleted(source: Terminal)
 }
 
 public extension TerminalTmuxDelegate {
     func tmuxPaneOutput(source: Terminal) {}
+    func tmuxResizeCompleted(source: Terminal) {}
 }
 
 // Default implementations
