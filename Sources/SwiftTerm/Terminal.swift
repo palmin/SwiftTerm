@@ -4703,10 +4703,16 @@ open class Terminal {
             if buffers!.isAlternateBuffer {
                 buffers!.activateNormalBuffer(clearAlt: false)
             }
+            // reset the buffer so stale scrollback from a previous session
+            // doesn't leak into the new capture (e.g. yBase=1253 from an
+            // old session with massive history)
+            buffer.clear()
+            buffer.yBase = 0
+            buffer.fillViewportRows()
             tmuxCaptureRemaining = 3
             tmuxCaptureNeedsClear = true
 #if DEBUG
-            print("tmux: SFSTATE armed captureRemaining=3 (switched to normal buffer)")
+            print("tmux: SFSTATE armed captureRemaining=3")
 #endif
         } else {
 #if DEBUG
