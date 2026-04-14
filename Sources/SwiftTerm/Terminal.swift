@@ -883,6 +883,28 @@ open class Terminal {
         case "alert-bell":
             tdel.bell(source: self)
 
+        case "layout-change":
+            // format: window-id layout visible-layout zoomed-flag
+            // layout: <checksum>,<cols>x<rows>,<x>,<y>,<pane-id-or-subtree>
+            // we only need the outer cols x rows — the "effective" window
+            // size tmux has resolved (smallest of all attached clients)
+            guard let line = String(data: Data(params), encoding: .utf8) else { break }
+            let fields = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: false).map { String($0) }
+            guard fields.count >= 2 else { break }
+            let windowId = fields[0]
+            let layout = fields[1]
+            // skip leading checksum + comma, then parse `<cols>x<rows>`
+            let parts = layout.split(separator: ",")
+            guard parts.count >= 2 else { break }
+            let dims = parts[1].split(separator: "x")
+            guard dims.count == 2,
+                  let cols = Int(dims[0]),
+                  let rows = Int(dims[1]) else { break }
+#if DEBUG
+            print("tmux: %layout-change window=\(windowId) effective=\(cols)x\(rows)")
+#endif
+            tmuxDelegate?.tmuxLayoutChanged(source: self, windowId: windowId, cols: cols, rows: rows)
+
         case "subscription-changed":
             // format: id session window index pane : value
             // (where `-` is used for fields that don't apply, e.g. session-scoped subs)
@@ -5472,12 +5494,18 @@ public protocol TerminalTmuxDelegate: AnyObject {
     /// subscriptions (e.g. title, cwd). windowId / paneId may be "-" for
     /// session-scoped subscriptions.
     func tmuxSubscriptionChanged(source: Terminal, id: String, sessionId: String, windowId: String, paneId: String, value: String)
+    /// called on each `%layout-change`; carries the window's effective cols
+    /// and rows as resolved by tmux. When multiple clients are attached,
+    /// this is the size of the smallest client — i.e. the actual size of
+    /// the drawn content, which may be smaller than our view.
+    func tmuxLayoutChanged(source: Terminal, windowId: String, cols: Int, rows: Int)
 }
 
 public extension TerminalTmuxDelegate {
     func tmuxPaneOutput(source: Terminal) {}
     func tmuxResizeCompleted(source: Terminal) {}
     func tmuxSubscriptionChanged(source: Terminal, id: String, sessionId: String, windowId: String, paneId: String, value: String) {}
+    func tmuxLayoutChanged(source: Terminal, windowId: String, cols: Int, rows: Int) {}
 }
 
 // Default implementations
