@@ -815,6 +815,40 @@ open class Terminal {
             }
             tmuxDelegate?.tmuxPaneOutput(source: self)
 
+        case "extended-output":
+            // format: paneId ageMs : encodedData
+            // tmux sends this (instead of %output) for clients with the
+            // pause-after flag, so the client can see how long data sat
+            // queued before being delivered. we treat it identically to
+            // %output; the age field is informational only.
+            guard let firstSpace = params.firstIndex(of: 32) else { return }
+            let afterPane = params.index(after: firstSpace)
+            guard let secondSpace = params[afterPane...].firstIndex(of: 32) else { return }
+            // expect ": " after the age; skip it
+            let afterAge = params.index(after: secondSpace)
+            guard afterAge < params.endIndex, params[afterAge] == UInt8(ascii: ":") else { return }
+            let afterColon = params.index(after: afterAge)
+            // data starts after the space that follows the colon (if any)
+            let dataStart = (afterColon < params.endIndex && params[afterColon] == 32)
+                ? params.index(after: afterColon) : afterColon
+#if DEBUG
+            let paneId = String(data: Data(params[params.startIndex..<firstSpace]), encoding: .utf8) ?? "?"
+            let age = String(data: Data(params[afterPane..<secondSpace]), encoding: .utf8) ?? "?"
+            print("tmux: %extended-output pane=\(paneId) ageMs=\(age) bytes=\(params.endIndex - dataStart) captureRemaining=\(tmuxCaptureRemaining)")
+#endif
+            if tmuxCaptureRemaining > 0 {
+#if DEBUG
+                print("tmux: %extended-output suppressed (capture in progress)")
+#endif
+                break
+            }
+            var extDecoded = tmuxDecodeOctal(params[dataStart...])
+            extDecoded.replace("\u{1b}Ptmux;\u{1b}\u{1b}", "\u{1b}")
+            if !extDecoded.isEmpty {
+                let _ = parser.parse2(data: extDecoded[...])
+            }
+            tmuxDelegate?.tmuxPaneOutput(source: self)
+
         case "window-renamed":
             // format: windowId name
             guard let spaceIdx = params.firstIndex(of: 32) else { return }
