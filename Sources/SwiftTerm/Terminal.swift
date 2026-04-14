@@ -732,6 +732,10 @@ open class Terminal {
     /// SFSTATE only arms captureRemaining when this is true, preventing
     /// standalone state queries from suppressing %output
     public var tmuxCaptureExpected = false
+    /// Current pane id reported by tmux (e.g. "%9"); read from SFSTATE.
+    /// Used for targeted refresh-client -A '<pane>:continue' commands when
+    /// the client is running under tmux pause-after.
+    public var currentTmuxPaneId: String? = nil
     /// Number of pending tmux commands whose %end we're waiting for before
     /// sending capture-pane. Set when refresh-client -C is sent; decremented
     /// on each empty %end block. When it reaches 0, the delegate is notified
@@ -4740,6 +4744,11 @@ open class Terminal {
 
         func flag(_ key: String) -> Bool { dict[key] == "1" }
         func int(_ key: String) -> Int? { dict[key].flatMap { Int($0) } }
+
+        // current pane id, used for -A '<pane>:continue' commands
+        if let pid = dict["pane_id"], !pid.isEmpty {
+            currentTmuxPaneId = pid
+        }
 
         // mouse mode (priority matches iTerm2/tmux tty.c)
         if flag("mouse_all_flag") {
