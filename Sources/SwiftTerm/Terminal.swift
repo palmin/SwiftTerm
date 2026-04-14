@@ -736,6 +736,14 @@ open class Terminal {
     /// Used for targeted refresh-client -A '<pane>:continue' commands when
     /// the client is running under tmux pause-after.
     public var currentTmuxPaneId: String? = nil
+
+    /// set hostCurrentDirectory from a tmux `pane_current_path` push
+    /// subscription and notify the delegate. public wrapper around the
+    /// private setter so ShellFish's tmux subscription handler can use it.
+    public func updateHostCurrentDirectoryFromTmux(_ path: String) {
+        hostCurrentDirectory = path.isEmpty ? nil : path
+        tdel.hostCurrentDirectoryUpdated(source: self)
+    }
     /// Number of pending tmux commands whose %end we're waiting for before
     /// sending capture-pane. Set when refresh-client -C is sent; decremented
     /// on each empty %end block. When it reaches 0, the delegate is notified
@@ -840,6 +848,27 @@ open class Terminal {
 
         case "alert-bell":
             tdel.bell(source: self)
+
+        case "subscription-changed":
+            // format: id session window index pane : value
+            // (where `-` is used for fields that don't apply, e.g. session-scoped subs)
+            guard let line = String(data: Data(params), encoding: .utf8) else { break }
+            // split on " : " (first occurrence) to separate the header from the value;
+            // the value itself may contain colons and whitespace
+            let sep = " : "
+            guard let sepRange = line.range(of: sep) else { break }
+            let header = line[..<sepRange.lowerBound]
+            let value = String(line[sepRange.upperBound...])
+            let headerFields = header.split(separator: " ", maxSplits: 4, omittingEmptySubsequences: false).map { String($0) }
+            guard headerFields.count == 5 else { break }
+            let id = headerFields[0]
+            let sessionId = headerFields[1]
+            let windowId = headerFields[2]
+            let paneId = headerFields[4]
+#if DEBUG
+            print("tmux: %subscription-changed id=\(id) session=\(sessionId) window=\(windowId) pane=\(paneId) value=\(value)")
+#endif
+            tmuxDelegate?.tmuxSubscriptionChanged(source: self, id: id, sessionId: sessionId, windowId: windowId, paneId: paneId, value: value)
 
         default:
 #if DEBUG
@@ -5404,11 +5433,17 @@ public protocol TerminalTmuxDelegate: AnyObject {
     /// blocks arrived); the client can now send capture-pane knowing the
     /// pane has been resized and SIGWINCH has been delivered
     func tmuxResizeCompleted(source: Terminal)
+    /// called on each `%subscription-changed` notification from tmux; routing
+    /// by id lets the client split one notification stream across multiple
+    /// subscriptions (e.g. title, cwd). windowId / paneId may be "-" for
+    /// session-scoped subscriptions.
+    func tmuxSubscriptionChanged(source: Terminal, id: String, sessionId: String, windowId: String, paneId: String, value: String)
 }
 
 public extension TerminalTmuxDelegate {
     func tmuxPaneOutput(source: Terminal) {}
     func tmuxResizeCompleted(source: Terminal) {}
+    func tmuxSubscriptionChanged(source: Terminal, id: String, sessionId: String, windowId: String, paneId: String, value: String) {}
 }
 
 // Default implementations
