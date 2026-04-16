@@ -886,8 +886,9 @@ open class Terminal {
         case "layout-change":
             // format: window-id layout visible-layout zoomed-flag
             // layout: <checksum>,<cols>x<rows>,<x>,<y>,<pane-id-or-subtree>
-            // we only need the outer cols x rows — the "effective" window
-            // size tmux has resolved (smallest of all attached clients)
+            // we need the outer cols x rows — the "effective" window
+            // size tmux has resolved (smallest of all attached clients) —
+            // plus a quick "has splits" check derived from the layout syntax.
             guard let line = String(data: Data(params), encoding: .utf8) else { break }
             let fields = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: false).map { String($0) }
             guard fields.count >= 2 else { break }
@@ -900,10 +901,12 @@ open class Terminal {
             guard dims.count == 2,
                   let cols = Int(dims[0]),
                   let rows = Int(dims[1]) else { break }
+            // split containers: `{` horizontal, `[` vertical; absence means a single pane
+            let hasSplits = layout.contains("{") || layout.contains("[")
 #if DEBUG
-            print("tmux: %layout-change window=\(windowId) effective=\(cols)x\(rows)")
+            print("tmux: %layout-change window=\(windowId) effective=\(cols)x\(rows) hasSplits=\(hasSplits)")
 #endif
-            tmuxDelegate?.tmuxLayoutChanged(source: self, windowId: windowId, cols: cols, rows: rows)
+            tmuxDelegate?.tmuxLayoutChanged(source: self, windowId: windowId, cols: cols, rows: rows, hasSplits: hasSplits)
 
         case "subscription-changed":
             // format: id session window index pane : value
@@ -5498,14 +5501,18 @@ public protocol TerminalTmuxDelegate: AnyObject {
     /// and rows as resolved by tmux. When multiple clients are attached,
     /// this is the size of the smallest client — i.e. the actual size of
     /// the drawn content, which may be smaller than our view.
-    func tmuxLayoutChanged(source: Terminal, windowId: String, cols: Int, rows: Int)
+    /// `hasSplits` is true when the layout string contains any split container
+    /// (`{` or `[`), i.e. the window has more than one pane. This is a proxy,
+    /// not an exact count — clients that need the pane count should query
+    /// `#{window_panes}` separately.
+    func tmuxLayoutChanged(source: Terminal, windowId: String, cols: Int, rows: Int, hasSplits: Bool)
 }
 
 public extension TerminalTmuxDelegate {
     func tmuxPaneOutput(source: Terminal) {}
     func tmuxResizeCompleted(source: Terminal) {}
     func tmuxSubscriptionChanged(source: Terminal, id: String, sessionId: String, windowId: String, paneId: String, value: String) {}
-    func tmuxLayoutChanged(source: Terminal, windowId: String, cols: Int, rows: Int) {}
+    func tmuxLayoutChanged(source: Terminal, windowId: String, cols: Int, rows: Int, hasSplits: Bool) {}
 }
 
 // Default implementations
