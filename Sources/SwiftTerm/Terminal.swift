@@ -1214,6 +1214,7 @@ open class Terminal {
             if self.tmuxCaptureRemaining > 0 {
                 let phase = self.tmuxCaptureRemaining
                 self.tmuxCaptureRemaining -= 1
+                self.prepareForTmuxCapturePaneReplay()
 
                 // strip trailing CR/LF to avoid scrolling past the last row
                 var trimmed = bytes
@@ -1335,6 +1336,24 @@ open class Terminal {
             }
             return false
         }
+    }
+
+    /// `tmux capture-pane -e` emits SO/SI around cells that used DEC line
+    /// drawing, but it does not replay the original `ESC ) 0` charset
+    /// designation.  A fresh restore resets our charset state, so seed the
+    /// capture replay with tmux's assumption: G0 is default text and G1 is
+    /// DEC Special Graphics.
+    func prepareForTmuxCapturePaneReplay()
+    {
+        let decSpecialKey = Character("0").asciiValue!
+        let decSpecial: [UInt8: String]?
+        objc_sync_enter(CharSets.allLocker)
+        decSpecial = CharSets.all[decSpecialKey]
+        objc_sync_exit(CharSets.allLocker)
+
+        setgLevel(0)
+        setgCharset(0, charset: CharSets.defaultCharset)
+        setgCharset(1, charset: decSpecial)
     }
     
     func cmdSet8BitControls ()
