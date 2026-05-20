@@ -1008,9 +1008,6 @@ extension TerminalView: TerminalDelegate {
         }
     }
 
-    open func kittyKeyboardModeChanged(source: Terminal) {
-    }
-
     open func setTerminalTitle(source: Terminal, title: String) {
         terminalDelegate?.setTerminalTitle(source: self, title: title)
     }

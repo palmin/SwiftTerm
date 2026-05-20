@@ -149,15 +149,6 @@ public protocol TerminalDelegate {
     func mouseModeChanged (source: Terminal)
 
     /**
-     * This method is invoked when the kitty keyboard protocol flags have changed,
-     * giving the UI a chance to adjust keyboard encoding accordingly.
-     *
-     * The current flags can be read from `source.kittyKeyboardFlags`.
-     * The default implementation does nothing.
-     */
-    func kittyKeyboardModeChanged (source: Terminal)
-
-    /**
      * This method is invoked when a request to change the cursor style has been issued
      * by client application.
      */
@@ -302,18 +293,6 @@ open class Terminal {
     public var bracketedPasteMode : Bool = false
     public var synchronizedOutputMode: Bool = false
 
-    // kitty keyboard protocol state
-    // flags: bit 0 = disambiguate, bit 1 = event types, bit 2 = alternate keys,
-    //        bit 3 = report all keys, bit 4 = associated text
-    public internal(set) var kittyKeyboardFlags: UInt = 0 {
-        didSet {
-            if kittyKeyboardFlags != oldValue {
-                tdel.kittyKeyboardModeChanged(source: self)
-            }
-        }
-    }
-    var kittyKeyboardStack: [UInt] = []
-    static let kittyKeyboardMaxStack = 16
     var charset : [UInt8:String]? = nil
     var gcharset : Int = 0
     var wraparound : Bool = false
@@ -609,8 +588,6 @@ open class Terminal {
         wraparound = true
         savedWraparound = wraparound
         bracketedPasteMode = false
-        kittyKeyboardFlags = 0
-        kittyKeyboardStack = []
 
         // charset'
         charset = nil
@@ -988,14 +965,7 @@ open class Terminal {
         parser.csiHandlers [UInt8 (ascii: "g")] = cmdTabClear
         parser.csiHandlers [UInt8 (ascii: "h")] = cmdSetMode
         parser.csiHandlers [UInt8 (ascii: "l")] = cmdResetMode
-        parser.csiHandlers [UInt8 (ascii: "m")] = { pars, collect in
-            // CSI > Pp ; Pv m is xterm modifyOtherKeys, not SGR
-            if collect == [UInt8(ascii: ">")] {
-                self.cmdModifyOtherKeys(pars, collect)
-                return
-            }
-            self.cmdCharAttributes(pars, collect)
-        }
+        parser.csiHandlers [UInt8 (ascii: "m")] = cmdCharAttributes
         parser.csiHandlers [UInt8 (ascii: "n")] = cmdDeviceStatus
         parser.csiHandlers [UInt8 (ascii: "p")] = csiPHandler
         parser.csiHandlers [UInt8 (ascii: "q")] = cmdSetCursorStyle
@@ -1009,9 +979,7 @@ open class Terminal {
             }
         }
         parser.csiHandlers [UInt8 (ascii: "t")] = csit
-        parser.csiHandlers [UInt8 (ascii: "u")] = { pars, collect in
-            self.csiUHandler(pars, collect)
-        }
+        parser.csiHandlers [UInt8 (ascii: "u")] = cmdRestoreCursor
         parser.csiHandlers [UInt8 (ascii: "v")] = csiCopyRectangularArea
         parser.csiHandlers [UInt8 (ascii: "x")] = csiX                    /* x DECFRA - could be overloaded */
         parser.csiHandlers [UInt8 (ascii: "y")] = cmdDECRQCRA             /* y - Checksum Region */
@@ -3217,8 +3185,6 @@ open class Terminal {
         savedReverseWraparound = false
         wraparound = true  // defaults: xterm - true, vt100 - false
         applicationKeypad = false
-        kittyKeyboardFlags = 0
-        kittyKeyboardStack = []
         syncScrollArea ()
         applicationCursor = false
         buffer.scrollTop = 0
@@ -3280,7 +3246,6 @@ open class Terminal {
         print("mouseProtocol: \(mouseProtocol)")
 
         print("--- keyboard ---")
-        print("kittyKeyboardFlags: \(kittyKeyboardFlags) (stack: \(kittyKeyboardStack))")
         print("conformance: \(conformance)")
 
         print("--- charset ---")
@@ -3434,9 +3399,6 @@ open class Terminal {
             }
         }
     }
-
-    // MARK: - Kitty keyboard protocol
-    // handler and helper methods are in Terminal+KittyKeyboard.swift
 
     //
     // CSI Pm m  Character Attributes (SGR).
@@ -4252,7 +4214,6 @@ open class Terminal {
         let name = options.termName
         if collect == [] {
             if name.hasPrefix("xterm") || name.hasPrefix ("rxvt-unicode") || name.hasPrefix("screen") {
-                log("Kitty: DA1 query received, responding with ?1;2c")
                 sendResponse (cc.CSI, "?1;2c")
             } else if name.hasPrefix ("linux") {
                 sendResponse (cc.CSI, "?6c")
@@ -5595,9 +5556,6 @@ public extension TerminalDelegate {
     }
 
     func mouseModeChanged(source: Terminal) {
-    }
-
-    func kittyKeyboardModeChanged(source: Terminal) {
     }
 
     func hostCurrentDirectoryUpdated (source: Terminal) {
