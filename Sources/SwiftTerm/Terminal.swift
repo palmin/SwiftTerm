@@ -1017,6 +1017,8 @@ open class Terminal {
         parser.oscHandlers [1] = { data in self.setIconTitle(text: String (bytes: data, encoding: .utf8) ?? "") }
         //   2 - title
         parser.oscHandlers [2] = { data in self.setTitle(text: String (bytes: data, encoding: .utf8) ?? "")}
+        // screen/tmux ESC k <title> ST
+        parser.screenTitleHandler = { data in self.setTitle(text: String (bytes: data, encoding: .utf8) ?? "")}
         //   3 - set property X in the form "prop=value"
         //   4 - Change Color Number()
         parser.oscHandlers [4] = oscChangeOrQueryColorIndex

@@ -223,6 +223,9 @@ class EscapeSequenceParser {
         table.add (codes: r (low: 0x51, high: 0x58), state: .escape, action: .escDispatch, next: .ground)
         table.add (codes: [0x59, 0x5a, 0x5c], state: .escape, action: .escDispatch, next: .ground)
         table.add (codes: r (low: 0x60, high: 0x7f), state: .escape, action: .escDispatch, next: .ground)
+        // ESC k <title> ST (screen/tmux title) — must follow the 0x60-0x7f rule
+        // above to override 'k'; collected as an OSC string, swallowed in oscEnd
+        table.add (code: 0x6b, state: .escape, action: .oscStart, next: .oscString)
         // dcs entry
         table.add (code: 0x50, state: .escape, action: .clear, next: .dcsEntry)
         table.add (codes: executables, state: .dcsEntry, action: .ignore, next: .dcsEntry)
@@ -281,6 +284,9 @@ class EscapeSequenceParser {
     // Handlers
     var csiHandlers: [UInt8:CsiHandler] = [:]
     var oscHandlers: [Int:OscHandler] = [:]
+    // screen/tmux title (ESC k <title> ST), routed via the OSC string collector
+    var screenTitleHandler: OscHandler = { _ in }
+    var oscIsScreenTitle = false
     var executeHandlers: [UInt8:ExecuteHandler] = [:]
     var escHandlers: [cstring:EscHandler] = [:]
     var dcsHandlers: [cstring:DcsHandler] = [:]
@@ -329,6 +335,8 @@ class EscapeSequenceParser {
         dcsHandlers.removeAll()
         activeDcsHandler = nil
         errorHandler = { $0 }
+        screenTitleHandler = { _ in }
+        oscIsScreenTitle = false
         oscHandlerFallback = { _, _ in }
         executeHandlerFallback = {}
         printHandler = { _ in }
@@ -802,6 +810,8 @@ class EscapeSequenceParser {
                     printVal = -1
                 }
                 osc = []
+                // ESC k entry -> collect as screen/tmux title
+                oscIsScreenTitle = (code == 0x6b)
             case .oscPut:
                 var j = i
                 while j < len {
@@ -815,13 +825,19 @@ class EscapeSequenceParser {
                 }
                 i = j - 1
             case .oscEnd:
-                if osc.count != 0 && code != ControlCodes.CAN && code != ControlCodes.SUB {
+                if oscIsScreenTitle {
+                    // whole buffer is the title, no OSC code prefix
+                    if osc.count != 0 && code != ControlCodes.CAN && code != ControlCodes.SUB {
+                        screenTitleHandler (osc [0...])
+                    }
+                    oscIsScreenTitle = false
+                } else if osc.count != 0 && code != ControlCodes.CAN && code != ControlCodes.SUB {
                     // NOTE: OSC subparsing is not part of the original parser
                     // we do basic identifier parsing here to offer a jump table for OSC as well
                     var oscCode : Int
                     var content : ArraySlice<UInt8>
                     let semiColonAscii = 59 // ';'
-                    
+
                     if let idx = osc.firstIndex (of: UInt8(semiColonAscii)){
                         oscCode = EscapeSequenceParser.parseInt (osc [0..<idx])
                         content = osc [(idx+1)...]
@@ -900,7 +916,7 @@ extension ArraySlice where Element == UInt8 {
         nullTerminated.append(0)
         return String(cString: nullTerminated)
     }
-    
+
     func debugString(around: Int) -> String {
         let end = around + 30
         let to = end < self.endIndex ? end : self.endIndex
