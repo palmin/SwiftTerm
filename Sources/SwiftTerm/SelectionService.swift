@@ -185,7 +185,7 @@ class SelectionService {
         var colScan = position.col
         var left = colScan
         while colScan >= 0 {
-            let ch = buffer.getChar(at: Position (col: colScan, row: position.row)).getCharacter()
+            let ch = buffer.getChar(at: Position (col: colScan, row: position.row)).getCharacter(terminal.graphemes)
             if !includeFunc (ch) {
                 break
             }
@@ -198,7 +198,7 @@ class SelectionService {
         var right = colScan
         let limit = terminal.cols
         while colScan < limit {
-            let ch = buffer.getChar(at: Position (col: colScan, row: position.row)).getCharacter()
+            let ch = buffer.getChar(at: Position (col: colScan, row: position.row)).getCharacter(terminal.graphemes)
             if !includeFunc (ch) {
                 break
             }
@@ -223,7 +223,7 @@ class SelectionService {
         for line in position.row..<terminal.rows {
             for col in startCol..<terminal.cols {
                 let p =  Position(col: col, row: line)
-                let ch = buffer.getChar (at: p).getCharacter ()
+                let ch = buffer.getChar (at: p).getCharacter (terminal.graphemes)
                 
                 if ch == "(" {
                     wait.append (")")
@@ -261,7 +261,7 @@ class SelectionService {
         for line in (0...position.row).reversed() {
             for col in (0...startCol).reversed() {
                 let p =  Position(col: col, row: line)
-                let ch = buffer.getChar (at: p).getCharacter ()
+                let ch = buffer.getChar (at: p).getCharacter (terminal.graphemes)
                 
                 if ch == ")" {
                     wait.append ("(")
@@ -296,7 +296,7 @@ class SelectionService {
         let position = Position(
             col: max (min (uncheckedPosition.col, buffer.cols-1), 0),
             row: max (min (uncheckedPosition.row, buffer.rows-1), 0))
-        switch buffer.getChar(at: position).getCharacter() {
+        switch buffer.getChar(at: position).getCharacter(terminal.graphemes) {
         case Character(UnicodeScalar(0)):
             simpleScanSelection (from: position, in: buffer) { ch in ch == nullChar }
         case " ":

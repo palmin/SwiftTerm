@@ -260,7 +260,16 @@ open class Terminal {
     public private(set) var rows : Int = 25
     var tabStopWidth : Int = 8
     var options: TerminalOptions
-    
+
+    /// Per-terminal table interning multi-scalar graphemes, replacing the former
+    /// process-global statics on `CharData`. Confined to this engine (which the
+    /// host drives on a single serial queue) so it needs no locking.
+    let graphemes = GraphemeTable ()
+
+    /// Per-terminal registry for `TinyAtom` payloads (OSC 8 urls, inline images),
+    /// replacing the former process-global statics on `TinyAtom`.
+    let atoms = AtomTable ()
+
     // The current buffers
     var buffers : BufferSet!
     
@@ -561,7 +570,7 @@ open class Terminal {
     
     public func getCharacter (col: Int, row: Int) -> Character?
     {
-        return getCharData(col: col, row: row)?.getCharacter()
+        return getCharData(col: col, row: row)?.getCharacter(graphemes)
     }
     
     func setup (isReset: Bool = false)
@@ -1348,7 +1357,7 @@ open class Terminal {
 
     public var anyImages = false
     func image (_ image: ImageCell) {
-        guard let token = TinyAtom.lookup (value: image) else {
+        guard let token = atoms.lookup (value: image) else {
             return
         }
         
@@ -1554,12 +1563,12 @@ open class Terminal {
                             var cd = existingLine [lastx]
                             
                             // Attemp the combination
-                            let newStr = String ([cd.getCharacter (), ch])
+                            let newStr = String ([cd.getCharacter (graphemes), ch])
                             
                             // If the resulting string is 1 grapheme cluster, then it combined properly
                             if newStr.count == 1 {
                                 if let newCh = newStr.first {
-                                    cd.setValue(char: newCh, size: Int32 (cd.width))
+                                    cd.setValue(char: newCh, size: Int32 (cd.width), graphemes: graphemes)
                                     existingLine [lastx] = cd
                                     updateRange (last.y)
                                     continue
@@ -1574,7 +1583,7 @@ open class Terminal {
             //if screenReaderMode {
             //    emitChar (ch)
             //}
-            let charData = CharData (attribute: curAttr, char: ch, size: Int8 (chWidth))
+            let charData = makeCharData (attribute: curAttr, char: ch, size: Int8 (chWidth))
             insertCharacter (charData)
         }
         updateRange (buffer.y)
@@ -1582,14 +1591,25 @@ open class Terminal {
         readingBuffer.done ()
     }
     
+    /// Builds a `CharData` for a character, interning multi-scalar graphemes in
+    /// this terminal's `GraphemeTable`. Use this instead of `CharData(attribute:
+    /// char:size:)` whenever the character can be a real grapheme cluster.
+    func makeCharData (attribute: Attribute, char: Character, size: Int8 = 1) -> CharData
+    {
+        if char.utf16.count == 1 {
+            return CharData (rawCode: Int32 (char.utf16.first!), attribute: attribute, size: size)
+        }
+        return CharData (rawCode: graphemes.intern (char), attribute: attribute, size: size)
+    }
+
     // Inserts the specified character with the computed width into the next cell, following
     // the rules for wrapping around, scrolling and overflow expected in the terminal.
     func insertCharacter (_ charData: CharData)
     {
         var chWidth = Int (charData.width)
 #if xxx_DEBUG
-        print("insertCharacter y = \(buffer.y): \(charData.getCharacter())")
-        if chWidth > 1 || charData.getCharacter() == "x" {
+        print("insertCharacter y = \(buffer.y): \(charData.getCharacter(graphemes))")
+        if chWidth > 1 || charData.getCharacter(graphemes) == "x" {
             print("\(charData).width = \(chWidth)")
         }
 #endif
@@ -1613,7 +1633,7 @@ open class Terminal {
                     // The line already exists (eg. the initial viewport), mark it as a
                     // wrapped line
 #if xxx_DEBUG
-                    print("wrapped from line \(buffer.y + buffer.yBase): \(buffer.lines[buffer.y + buffer.yBase].translateToString())")
+                    print("wrapped from line \(buffer.y + buffer.yBase): \(buffer.lines[buffer.y + buffer.yBase].translateToString(graphemes: graphemes))")
 #endif
                     buffer.y += 1
                     buffer.lines [buffer.y + buffer.yBase].isWrapped = true
@@ -1856,7 +1876,7 @@ open class Terminal {
             // We only had the terminator, so we can close ";"
             if let hlt = hyperLinkTracking {
                 let str = hlt.payload
-                if let urlToken = TinyAtom.lookup (value: str) {
+                if let urlToken = atoms.lookup (value: str) {
                     //print ("Setting the text from \(hlt.start) to \(buffer.x) on line \(buffer.y+buffer.yBase) to \(str)")
                     
                     // Between the time the flag was set, and now `y` might have changed negatively,
@@ -2117,7 +2137,7 @@ open class Terminal {
     func cursorForward (count: Int)
     {
         var right = marginMode ? buffer.marginRight : cols-1
-        
+
         // When the cursor starts after the right margin, CUF moves to the full width
         if buffer.x > right {
             right = buffer.cols - 1
@@ -2140,10 +2160,10 @@ open class Terminal {
     func cursorBackward (count: Int)
     {
         let buffer = self.buffer
-        
+
         // What is our left margin - depending on the settings.
         var left = marginMode ? buffer.marginLeft : 0
-        
+
         // If the cursor is positioned before the margin, we can go backwards to the first column
         if buffer.x < left {
             left = 0
@@ -2664,7 +2684,7 @@ open class Terminal {
                 for row in top...bottom {
                     let line = buffer.lines [row+buffer.yBase]
                     for col in left...right {
-                        line [col] = CharData(attribute: curAttr, char: Character (UnicodeScalar (pars [0]) ?? " "))
+                        line [col] = makeCharData(attribute: curAttr, char: Character (UnicodeScalar (pars [0]) ?? " "))
                     }
                 }
             }
@@ -2724,7 +2744,7 @@ open class Terminal {
                     let line = buffer.lines [row+buffer.yBase]
                     for col in left...right {
                         let cd = line [col]
-                        let ch = cd.code == 0 ? " " : cd.getCharacter()
+                        let ch = cd.code == 0 ? " " : cd.getCharacter(graphemes)
                         
                         for scalar in ch.unicodeScalars {
                             checksum += scalar.value
@@ -2800,7 +2820,7 @@ open class Terminal {
                 let line = buffer.lines [row+buffer.yBase]
                 for col in left...right {
                     var cd = line [col]
-                    cd.setValue(char: " ", size: 1)
+                    cd.setValue(char: " ", size: 1, graphemes: graphemes)
                     line [col] = cd
                 }
             }
@@ -3262,7 +3282,7 @@ open class Terminal {
         for row in [0, rows/2, rows - 1] {
             for col in [0, cols - 1] {
                 if let cd = getCharData(col: col, row: row) {
-                    print("row[\(row)] col[\(col)]: fg=\(cd.attribute.fg), bg=\(cd.attribute.bg), style=\(cd.attribute.style), ch=\(cd.code == 0 ? "NUL" : String(cd.getCharacter()))")
+                    print("row[\(row)] col[\(col)]: fg=\(cd.attribute.fg), bg=\(cd.attribute.bg), style=\(cd.attribute.style), ch=\(cd.code == 0 ? "NUL" : String(cd.getCharacter(graphemes)))")
                 }
             }
         }
@@ -4662,11 +4682,11 @@ open class Terminal {
         to avoid accumulting memory for images and URLs that are no longer visible or
             available by scrolling.  */
     public func garbageCollectPayload() {
-        // stop right away if there is nothing to collect
-        if TinyAtom.lastCollected == TinyAtom.lastUsed {
+        // skip the buffer scan entirely when nothing has been allocated since the last sweep
+        if !atoms.hasCollectableAtoms {
             return
         }
-        
+
         // check all atoms used in both buffers
         var used = Set<UInt16>()
         for buffer in [buffers.normal, buffers.alt] {
@@ -4681,18 +4701,8 @@ open class Terminal {
                 }
             }
         }
-        
-        // since we create atoms in order we expect them to run out of use
-        // in order as well and stop with first atom that is still in use
-        for code in UInt16(TinyAtom.lastCollected + 1)...UInt16(TinyAtom.lastUsed) {
-            if used.contains(code) {
-                // code still in use
-                break
-            }
-            
-            TinyAtom.lastCollected = Int(code)
-            TinyAtom.release(code: code)
-        }
+
+        atoms.garbageCollect (used: used)
     }
     
     /**

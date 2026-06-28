@@ -822,7 +822,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations {
     {
         let hit = calculateMouseHit(with: event)
         let cd = terminal.buffer.lines [terminal.buffer.yDisp+hit.row][hit.col]
-        return cd.getPayload()
+        return cd.getPayload(terminal.atoms)
     }
     
     var didSelectionDrag: Bool = false

@@ -195,7 +195,7 @@ public class BufferLine: CustomDebugStringConvertible {
         data.replaceSubrange(dstCol..<(dstCol+len), with: src.data [srcCol..<(srcCol+len)])
     }
     
-    public func translateToString (trimRight: Bool = false, startCol: Int = 0, endCol: Int = -1) -> String
+    public func translateToString (trimRight: Bool = false, startCol: Int = 0, endCol: Int = -1, graphemes: GraphemeTable) -> String
     {
         var ec = endCol == -1 ? data.count : endCol
         if trimRight {
@@ -203,14 +203,19 @@ public class BufferLine: CustomDebugStringConvertible {
         }
         var result = ""
         for i in startCol..<ec {
-            result.append (data [i].getCharacter ())
+            result.append (data [i].getCharacter (graphemes))
         }
         return result
     }
     
     public var debugDescription: String {
         get {
-            translateToString()
+            // table-free rendering for debug; multi-scalar graphemes show as "?"
+            var result = ""
+            for cell in data {
+                result.append (cell.debugCharacter)
+            }
+            return result
         }
     }
 }

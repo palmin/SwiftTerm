@@ -175,18 +175,31 @@ public struct Attribute: Equatable, Hashable {
 /// it could in theory be changed to be 24 bits without much trouble
 public struct TinyAtom {
     var code: UInt16
-    static var map: [UInt16:Any] = [:]
-    static var lastUsed: Int = 0
-    static var lastCollected: Int = 0
-    static var empty = TinyAtom (code: 0)
-   
-    private init(code: UInt16)
+
+    /// The empty atom (code 0) means "no payload".
+    static let empty = TinyAtom (code: 0)
+
+    init (code: UInt16)
     {
         self.code = code
     }
-    
-    /// Returns the TinyAtom associated with the specified url, or nil if we ran out of space
-    public static func lookup (value: Any) -> TinyAtom? {
+}
+
+/// Per-terminal registry backing `TinyAtom` payloads (OSC 8 urls and inline
+/// images). These used to be process-global statics on `TinyAtom`, so every
+/// terminal shared one unsynchronized table; with one table per `Terminal`
+/// (each driven on a single serial queue) the access is thread-confined and
+/// needs no locking, and atoms can no longer leak or be collected across
+/// unrelated terminals.
+public final class AtomTable {
+    private var map: [UInt16:Any] = [:]
+    private var lastUsed: Int = 0
+    private var lastCollected: Int = 0
+
+    public init () {}
+
+    /// Returns a `TinyAtom` for the value, or nil if the 16-bit space is exhausted.
+    func lookup (value: Any) -> TinyAtom? {
         let next = lastUsed + 1
         if next < UInt16.max {
             map [UInt16 (next)] = value
@@ -195,19 +208,72 @@ public struct TinyAtom {
         }
         return nil
     }
-    
-    public static func release(code: UInt16) {
-        map.removeValue(forKey: code)
+
+    func release (code: UInt16) {
+        map.removeValue (forKey: code)
     }
-    
-    /// Returns the target for the TinyAtom
-    public var target: Any? {
-        get {
-            if code == 0 {
-                return nil
-            }
-            return TinyAtom.map [code]
+
+    /// Returns the value stored for the atom, or nil for the empty atom.
+    func resolve (_ atom: TinyAtom) -> Any? {
+        if atom.code == 0 {
+            return nil
         }
+        return map [atom.code]
+    }
+
+    /// Cheap pre-check so callers can skip an expensive buffer scan when nothing
+    /// has been allocated since the last sweep.
+    var hasCollectableAtoms: Bool { lastCollected != lastUsed }
+
+    /// Releases payloads whose codes precede the first still-in-use code.
+    /// `used` is the set of payload codes currently present in the buffers.
+    func garbageCollect (used: Set<UInt16>) {
+        // stop right away if there is nothing to collect
+        if lastCollected == lastUsed {
+            return
+        }
+        // since we create atoms in order we expect them to run out of use
+        // in order as well and stop with the first atom that is still in use
+        for code in UInt16 (lastCollected + 1)...UInt16 (lastUsed) {
+            if used.contains (code) {
+                break
+            }
+            lastCollected = Int (code)
+            map.removeValue (forKey: code)
+        }
+    }
+}
+
+/// Per-terminal table interning multi-scalar grapheme clusters (emoji, flags,
+/// ZWJ sequences, combining marks) so each `CharData` can store a 4-byte index
+/// instead of a heap-backed `Character`. These maps used to be process-global
+/// statics on `CharData`; one table per `Terminal` keeps the access confined to
+/// that engine's serial queue (no locking) and lets the table be freed with the
+/// terminal instead of growing for the lifetime of the process.
+public final class GraphemeTable {
+    // Contains the character to index mapping
+    var charToIndex: [Character:Int32] = [:]
+    // Contains the index to character mapping, could be a plain array
+    var indexToChar: [Int32:Character] = [:]
+    var lastCharIndex: Int32 = (1 << 22) + 1
+
+    public init () {}
+
+    /// Returns the stable index for the grapheme, allocating one if needed.
+    func intern (_ char: Character) -> Int32 {
+        if let existing = charToIndex [char] {
+            return existing
+        }
+        let code = lastCharIndex
+        charToIndex [char] = code
+        indexToChar [code] = char
+        lastCharIndex = lastCharIndex + 1
+        return code
+    }
+
+    /// Resolves an index previously returned by `intern` back to its grapheme.
+    func character (for code: Int32) -> Character {
+        return indexToChar [code] ?? " "
     }
 }
 
@@ -235,14 +301,7 @@ public struct CharData : CustomDebugStringConvertible {
     }
     
     static let maxRune = 1 << 22
-    
-    // Contains the character to index mapping
-    static var charToIndexMap: [Character:Int32] = [:]
-    
-    // Contains the index to character mapping, could be a plain array
-    static var indexToCharMap: [Int32: Character] = [:]
-    static var lastCharIndex: Int32 = (1 << 22)+1
-    
+
     
     static let defaultAttr = Attribute(fg: .defaultColor, bg: .defaultColor, style: .none)
     static let invertedAttr = Attribute(fg: .defaultInvertedColor, bg: .defaultInvertedColor, style: .none)
@@ -265,21 +324,31 @@ public struct CharData : CustomDebugStringConvertible {
     /// - Parameter attribute: an attribute containing the color and style attributes for the cell
     /// - Parameter char: the character that will be stored in this cell
     /// - Parameter size: the number of columns used by the `Character` stored in this `CharData` on the screen.
+    /// Creates a cell for a single-UTF16 character. Multi-scalar graphemes must
+    /// be created via `Terminal.makeCharData(attribute:char:size:)` so they are
+    /// interned in the owning terminal's `GraphemeTable`.
     init (attribute: Attribute, char: Character, size: Int8 = 1)
     {
         self.attribute = attribute
         if char.utf16.count == 1 {
             code = Int32 (char.utf16.first!)
         } else {
-            if let existingIdx = CharData.charToIndexMap [char] {
-                code = existingIdx
-            } else {
-                CharData.charToIndexMap [char] = CharData.lastCharIndex
-                CharData.indexToCharMap [CharData.lastCharIndex] = char
-                code = CharData.lastCharIndex
-                CharData.lastCharIndex = CharData.lastCharIndex + 1
-            }
+            assertionFailure ("CharData(attribute:char:) used with a multi-scalar grapheme; use Terminal.makeCharData")
+            code = Int32 (char.unicodeScalars.first?.value ?? 32)
         }
+        width = Int8 (size)
+        payload = TinyAtom.empty
+        unused = 0
+    }
+
+    /// Creates a cell from an already-resolved `code` (a Unicode scalar value, or
+    /// a grapheme index allocated by a `GraphemeTable`). Used by
+    /// `Terminal.makeCharData`; keeps `CharData` free of any back-reference so the
+    /// struct does not grow beyond storing the 4-byte `code`.
+    init (rawCode code: Int32, attribute: Attribute, size: Int8 = 1)
+    {
+        self.attribute = attribute
+        self.code = code
         width = Int8 (size)
         payload = TinyAtom.empty
         unused = 0
@@ -307,9 +376,9 @@ public struct CharData : CustomDebugStringConvertible {
         self.payload = atom
     }
     
-    public func getPayload () -> Any?
+    public func getPayload (_ atoms: AtomTable) -> Any?
     {
-         payload.target
+        atoms.resolve (payload)
     }
     
     public var hasPayload: Bool {
@@ -324,36 +393,44 @@ public struct CharData : CustomDebugStringConvertible {
     /// Updates the contents of this CharData with a new character.
     /// - Parameter char: the new character that will be stored
     /// - Paramerter size: the number of fixed sized columns this character will take on the screen
-    mutating public func setValue (char: Character, size: Int32)
+    mutating public func setValue (char: Character, size: Int32, graphemes: GraphemeTable)
     {
         if char.utf16.count == 1 {
             self.code = Int32 (char.utf16.first!)
         } else {
-            if let existingIdx = CharData.charToIndexMap [char] {
-                code = existingIdx
-            } else {
-                CharData.charToIndexMap [char] = CharData.lastCharIndex
-                CharData.indexToCharMap [CharData.lastCharIndex] = char
-                code = CharData.lastCharIndex
-                CharData.lastCharIndex = CharData.lastCharIndex + 1
-            }
+            self.code = graphemes.intern (char)
         }
         width = Int8 (size)
     }
-    
-    /// Use this method to retrieve the Character stored in the CharData
-    public func getCharacter () -> Character
+
+    /// Use this method to retrieve the Character stored in the CharData.
+    /// `graphemes` is the owning terminal's table, needed only for multi-scalar
+    /// grapheme clusters; single-scalar runes are decoded directly.
+    public func getCharacter (_ graphemes: GraphemeTable) -> Character
     {
         if code > CharData.maxRune {
             // This is an invariant - no code can be stored without the equivalent being tracked, but for the sake
             // of not having a "!" return a space.
-            return CharData.indexToCharMap [code] ?? " "
+            return graphemes.character (for: code)
         }
         if let c = Unicode.Scalar (UInt32 (code)) {
             return Character(c)
         } else {
             return " "
         }
+    }
+
+    /// Debug-only resolution that does not consult a `GraphemeTable`; multi-scalar
+    /// graphemes render as "?" since their value lives in the owning terminal's table.
+    var debugCharacter: Character
+    {
+        if code > CharData.maxRune {
+            return "?"
+        }
+        if let c = Unicode.Scalar (UInt32 (code)) {
+            return Character (c)
+        }
+        return " "
     }
 }
 
