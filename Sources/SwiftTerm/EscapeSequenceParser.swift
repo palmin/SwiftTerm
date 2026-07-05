@@ -781,10 +781,21 @@ class EscapeSequenceParser {
                     dcsHandler = dcs
                     dcs.hook (collect: collect, parameters: pars, flag: code)
                 } else {
-                    transition = ParserState.ground.rawValue
                     dscHandlerFallback(code, pars)
+                    // the fallback may have switched us into tmux control mode
+                    // (DCS 1000 p); in that case return to ground so the outer
+                    // parser can take over the byte stream. otherwise this is an
+                    // unrecognized DCS: swallow its body up to the ST terminator
+                    // instead of dropping into ground, where the payload would be
+                    // printed as literal text (e.g. an XTGETTCAP query leaking "4D73").
+                    if tmuxCommandMode {
+                        transition = ParserState.ground.rawValue
+                    } else {
+                        dcsHandler = nil
+                        transition = ParserState.dcsPassthrough.rawValue
+                    }
                 }
-                
+
                 break
             case .dcsPut:
                 dcs = (~dcs != 0) ? dcs : i

@@ -687,7 +687,106 @@ open class Terminal {
             terminal.sendResponse (terminal.cc.DCS, "\(ok)$r\(result)", terminal.cc.ST)
         }
     }
-    
+
+    // DCS + q Pt ST
+    // XTGETTCAP - Request Termcap/Terminfo String (xterm)
+    //   Pt is a ';'-separated list of capability names, each hex-encoded
+    //   with two hex digits per character (e.g. "4D73" for "Ms").
+    // Response, one DCS per requested capability:
+    //   valid:   DCS 1 + r <hexname>=<hexvalue> ST
+    //   invalid: DCS 0 + r <hexname> ST
+    // Answering this (rather than leaving it unhandled) keeps the query payload
+    // from spilling onto the screen and lets clients discover the capabilities
+    // we support, notably "Ms" for OSC 52 clipboard access.
+    class XTGETTCAP : DcsHandler {
+        var data: [UInt8]
+        var terminal: Terminal
+
+        public init (terminal: Terminal)
+        {
+            self.terminal = terminal
+            data = []
+        }
+
+        func hook (collect: cstring, parameters: [Int], flag: UInt8)
+        {
+            data = []
+        }
+
+        func put (data : ArraySlice<UInt8>)
+        {
+            self.data.append (contentsOf: data)
+        }
+
+        func unhook ()
+        {
+            for token in data.split (separator: UInt8 (ascii: ";")) {
+                // the request contains the capability name as hex; keep the
+                // original hex text for the reply and decode it to look up
+                guard let hexName = String (bytes: token, encoding: .ascii),
+                      let name = XTGETTCAP.decodeHex (token) else { continue }
+                if let value = terminal.termcapValue (for: name) {
+                    terminal.sendResponse (terminal.cc.DCS, "1+r\(hexName)=\(XTGETTCAP.encodeHex (value))", terminal.cc.ST)
+                } else {
+                    terminal.sendResponse (terminal.cc.DCS, "0+r\(hexName)", terminal.cc.ST)
+                }
+            }
+            data = []
+        }
+
+        // decode an ASCII hex string ("4D73") into its raw bytes ("Ms")
+        static func decodeHex (_ bytes: ArraySlice<UInt8>) -> [UInt8]?
+        {
+            guard bytes.count % 2 == 0 else { return nil }
+            var result = [UInt8] ()
+            var iterator = bytes.makeIterator ()
+            while let hi = iterator.next (), let lo = iterator.next () {
+                guard let h = hexValue (hi), let l = hexValue (lo) else { return nil }
+                result.append ((h << 4) | l)
+            }
+            return result
+        }
+
+        // encode raw bytes as an uppercase ASCII hex string
+        static func encodeHex (_ bytes: [UInt8]) -> String
+        {
+            let digits = Array ("0123456789ABCDEF".utf8)
+            var out = [UInt8] ()
+            for b in bytes {
+                out.append (digits [Int (b >> 4)])
+                out.append (digits [Int (b & 0xf)])
+            }
+            return String (bytes: out, encoding: .ascii) ?? ""
+        }
+
+        static func hexValue (_ c: UInt8) -> UInt8?
+        {
+            switch c {
+            case 0x30...0x39: return c - 0x30
+            case 0x41...0x46: return c - 0x41 + 10
+            case 0x61...0x66: return c - 0x61 + 10
+            default: return nil
+            }
+        }
+    }
+
+    // returns the raw terminfo/termcap value for capabilities we advertise via
+    // XTGETTCAP (DCS + q), or nil for capabilities we do not report. names use
+    // the termcap 2-letter form that clients query (e.g. "Ms", "Co").
+    func termcapValue (for name: [UInt8]) -> [UInt8]?
+    {
+        switch String (bytes: name, encoding: .ascii) {
+        case "Co", "colors":
+            return Array ("256".utf8)
+        case "Ms":
+            // OSC 52 set-selection format string: \E]52;%p1%s;%p2%s\007
+            // we support OSC 52 copy (see oscClipboard)
+            return [0x1b] + Array ("]52;%p1%s;%p2%s".utf8) + [0x07]
+        default:
+            return nil
+        }
+    }
+
     public var tmuxCommandMode: Bool {
         return parser.tmuxCommandMode
     }
@@ -1127,6 +1226,7 @@ open class Terminal {
         // DCS Handler
         parser.setDcsHandler ("$q", DECRQSS (terminal: self))
         parser.setDcsHandler ("q", SixelDcsHandler (terminal: self))
+        parser.setDcsHandler ("+q", XTGETTCAP (terminal: self))
         parser.dscHandlerFallback = { [weak self, weak parser] code, parameters in
             if let parser = parser {
                 let character = Character(UnicodeScalar(code))
