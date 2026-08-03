@@ -819,8 +819,17 @@ open class Terminal {
     public var tmuxCaptureExpected = false
     /// Current pane id reported by tmux (e.g. "%9"); read from SFSTATE.
     /// Used for targeted refresh-client -A '<pane>:continue' commands when
-    /// the client is running under tmux pause-after.
+    /// the client is running under tmux pause-after, and to route %output
+    /// so only the active pane draws into the buffer.
     public var currentTmuxPaneId: String? = nil
+    /// Session id ("$1") of the session this control client is attached to,
+    /// from %session-changed. A control client receives notifications about
+    /// every session on the server; this is used to ignore the others.
+    public var currentTmuxSessionId: String? = nil
+    /// Window id ("@1") of our session's current window, from an own-session
+    /// %session-window-changed or SFSTATE. Used to ignore %window-pane-changed
+    /// for windows that are not the one being displayed.
+    public var currentTmuxWindowId: String? = nil
 
     /// set hostCurrentDirectory from a tmux `pane_current_path` push
     /// subscription and notify the delegate. public wrapper around the
@@ -973,6 +982,10 @@ open class Terminal {
 #if DEBUG
             print("tmux: %session-changed id=\(sessionId) name=\(sessionName)")
 #endif
+            currentTmuxSessionId = sessionId.isEmpty ? nil : sessionId
+            // window tracking belongs to the previous session; the next
+            // SFSTATE or own-session %session-window-changed re-establishes it
+            currentTmuxWindowId = nil
             tmuxDelegate?.tmuxSessionChanged(source: self, sessionId: sessionId, sessionName: sessionName)
 
         case "exit":
@@ -1010,25 +1023,49 @@ open class Terminal {
 #endif
             tmuxDelegate?.tmuxLayoutChanged(source: self, windowId: windowId, cols: cols, rows: rows, hasSplits: hasSplits)
 
-        case "session-window-changed", "window-pane-changed":
-            // the server-side active window or pane changed, e.g. because the
-            // tmux prefix key was typed into the pane. window-pane-changed
-            // carries the new pane id ("@1 %5"); session-window-changed only
-            // the window ("$1 @2") and the pane id arrives with the delegate's
-            // follow-up SFSTATE query. until then output for panes other than
-            // the previous one keeps being filtered, which is fine because the
-            // delegate re-captures the newly active pane's content anyway.
-            if name == "window-pane-changed",
-               let spaceIdx = params.firstIndex(of: 32) {
-                let idBytes = params[(spaceIdx + 1)...].prefix(while: { $0 != 10 && $0 != 13 })
-                if let paneId = String(data: Data(idBytes), encoding: .utf8),
-                   paneId.hasPrefix("%") {
-                    currentTmuxPaneId = paneId
-                }
+        case "session-window-changed":
+            // format: sessionId windowId — our session's current window
+            // changed server-side, e.g. via the tmux prefix key typed into
+            // the pane. tmux sends this for EVERY session on the server, so
+            // changes in other sessions (agents churning windows in the
+            // background) must be ignored or the visible terminal would be
+            // reset and recaptured over and over.
+            guard let spaceIdx = params.firstIndex(of: 32) else { break }
+            let changedSession = String(data: Data(params[params.startIndex..<spaceIdx]), encoding: .utf8) ?? ""
+            let windowBytes = params[(spaceIdx + 1)...].prefix(while: { $0 != 10 && $0 != 13 })
+            let changedWindow = String(data: Data(windowBytes), encoding: .utf8) ?? ""
+            guard let ourSession = currentTmuxSessionId, changedSession == ourSession else {
+#if DEBUG
+                print("tmux: %session-window-changed ignored (session \(changedSession) is not ours \(currentTmuxSessionId ?? "unknown"))")
+#endif
+                break
             }
 #if DEBUG
-            print("tmux: %\(name) \(String(data: Data(params), encoding: .utf8) ?? "") — active pane now \(currentTmuxPaneId ?? "unknown")")
+            print("tmux: %session-window-changed window=\(changedWindow)")
 #endif
+            currentTmuxWindowId = changedWindow.isEmpty ? nil : changedWindow
+            tmuxDelegate?.tmuxActiveWindowChanged(source: self)
+
+        case "window-pane-changed":
+            // format: windowId paneId — sent for any window on the server;
+            // only a pane change in OUR current window may update the active
+            // pane, otherwise background splits would silence the visible
+            // pane by stealing the %output routing.
+            guard let spaceIdx = params.firstIndex(of: 32) else { break }
+            let changedWindow = String(data: Data(params[params.startIndex..<spaceIdx]), encoding: .utf8) ?? ""
+            let paneBytes = params[(spaceIdx + 1)...].prefix(while: { $0 != 10 && $0 != 13 })
+            let changedPane = String(data: Data(paneBytes), encoding: .utf8) ?? ""
+            guard let ourWindow = currentTmuxWindowId, changedWindow == ourWindow,
+                  changedPane.hasPrefix("%") else {
+#if DEBUG
+                print("tmux: %window-pane-changed ignored (window \(changedWindow) is not ours \(currentTmuxWindowId ?? "unknown"))")
+#endif
+                break
+            }
+#if DEBUG
+            print("tmux: %window-pane-changed — active pane now \(changedPane)")
+#endif
+            currentTmuxPaneId = changedPane
             tmuxDelegate?.tmuxActiveWindowChanged(source: self)
 
         case "subscription-changed":
@@ -1271,9 +1308,11 @@ open class Terminal {
                 if character == "p" && parameters == [1000] {
                     parser.tmuxCommandMode = true
                     if let self = self {
-                        // a pane id left over from a previous control mode
-                        // session must not filter the new session's output
+                        // ids left over from a previous control mode session
+                        // must not filter the new session's output
                         self.currentTmuxPaneId = nil
+                        self.currentTmuxSessionId = nil
+                        self.currentTmuxWindowId = nil
                         self.tmuxDelegate?.tmuxModeStarted(source: self)
                     }
                 }
@@ -4966,9 +5005,18 @@ open class Terminal {
         func flag(_ key: String) -> Bool { dict[key] == "1" }
         func int(_ key: String) -> Int? { dict[key].flatMap { Int($0) } }
 
-        // current pane id, used for -A '<pane>:continue' commands
+        // current pane id, used for -A '<pane>:continue' commands and to
+        // route %output to the visible pane
         if let pid = dict["pane_id"], !pid.isEmpty {
             currentTmuxPaneId = pid
+        }
+        // session and window ids, used to ignore notifications about other
+        // sessions and windows on the same server
+        if let sid = dict["session_id"], !sid.isEmpty {
+            currentTmuxSessionId = sid
+        }
+        if let wid = dict["window_id"], !wid.isEmpty {
+            currentTmuxWindowId = wid
         }
 
         // mouse mode (priority matches iTerm2/tmux tty.c)
