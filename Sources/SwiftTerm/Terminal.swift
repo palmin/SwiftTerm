@@ -879,10 +879,20 @@ open class Terminal {
         case "output":
             // format: paneId encodedData
             guard let spaceIdx = params.firstIndex(of: 32) else { return }
+            let paneId = String(data: Data(params[params.startIndex..<spaceIdx]), encoding: .utf8)
 #if DEBUG
-            let paneId = String(data: Data(params[params.startIndex..<spaceIdx]), encoding: .utf8) ?? "?"
-            print("tmux: %output pane=\(paneId) bytes=\(params.endIndex - spaceIdx - 1) captureRemaining=\(tmuxCaptureRemaining)")
+            print("tmux: %output pane=\(paneId ?? "?") bytes=\(params.endIndex - spaceIdx - 1) captureRemaining=\(tmuxCaptureRemaining)")
 #endif
+            // a control client receives %output for every pane in the session;
+            // only the active pane may draw into the shared buffer, otherwise
+            // background windows bleed into the visible terminal and can break
+            // escape sequences apart mid-parse
+            if let current = currentTmuxPaneId, let paneId = paneId, paneId != current {
+#if DEBUG
+                print("tmux: %output dropped (pane \(paneId) is not active pane \(current))")
+#endif
+                break
+            }
             // suppress %output while capture-pane responses are pending;
             // the captures will provide the full pane content and any
             // %output arriving during the transition would write stale
@@ -916,11 +926,18 @@ open class Terminal {
             // data starts after the space that follows the colon (if any)
             let dataStart = (afterColon < params.endIndex && params[afterColon] == 32)
                 ? params.index(after: afterColon) : afterColon
+            let extPaneId = String(data: Data(params[params.startIndex..<firstSpace]), encoding: .utf8)
 #if DEBUG
-            let paneId = String(data: Data(params[params.startIndex..<firstSpace]), encoding: .utf8) ?? "?"
             let age = String(data: Data(params[afterPane..<secondSpace]), encoding: .utf8) ?? "?"
-            print("tmux: %extended-output pane=\(paneId) ageMs=\(age) bytes=\(params.endIndex - dataStart) captureRemaining=\(tmuxCaptureRemaining)")
+            print("tmux: %extended-output pane=\(extPaneId ?? "?") ageMs=\(age) bytes=\(params.endIndex - dataStart) captureRemaining=\(tmuxCaptureRemaining)")
 #endif
+            // same active-pane routing as %output above
+            if let current = currentTmuxPaneId, let extPaneId = extPaneId, extPaneId != current {
+#if DEBUG
+                print("tmux: %extended-output dropped (pane \(extPaneId) is not active pane \(current))")
+#endif
+                break
+            }
             if tmuxCaptureRemaining > 0 {
 #if DEBUG
                 print("tmux: %extended-output suppressed (capture in progress)")
@@ -992,6 +1009,27 @@ open class Terminal {
             print("tmux: %layout-change window=\(windowId) effective=\(cols)x\(rows) hasSplits=\(hasSplits)")
 #endif
             tmuxDelegate?.tmuxLayoutChanged(source: self, windowId: windowId, cols: cols, rows: rows, hasSplits: hasSplits)
+
+        case "session-window-changed", "window-pane-changed":
+            // the server-side active window or pane changed, e.g. because the
+            // tmux prefix key was typed into the pane. window-pane-changed
+            // carries the new pane id ("@1 %5"); session-window-changed only
+            // the window ("$1 @2") and the pane id arrives with the delegate's
+            // follow-up SFSTATE query. until then output for panes other than
+            // the previous one keeps being filtered, which is fine because the
+            // delegate re-captures the newly active pane's content anyway.
+            if name == "window-pane-changed",
+               let spaceIdx = params.firstIndex(of: 32) {
+                let idBytes = params[(spaceIdx + 1)...].prefix(while: { $0 != 10 && $0 != 13 })
+                if let paneId = String(data: Data(idBytes), encoding: .utf8),
+                   paneId.hasPrefix("%") {
+                    currentTmuxPaneId = paneId
+                }
+            }
+#if DEBUG
+            print("tmux: %\(name) \(String(data: Data(params), encoding: .utf8) ?? "") — active pane now \(currentTmuxPaneId ?? "unknown")")
+#endif
+            tmuxDelegate?.tmuxActiveWindowChanged(source: self)
 
         case "subscription-changed":
             // format: id session window index pane : value
@@ -1233,6 +1271,9 @@ open class Terminal {
                 if character == "p" && parameters == [1000] {
                     parser.tmuxCommandMode = true
                     if let self = self {
+                        // a pane id left over from a previous control mode
+                        // session must not filter the new session's output
+                        self.currentTmuxPaneId = nil
                         self.tmuxDelegate?.tmuxModeStarted(source: self)
                     }
                 }
@@ -5598,6 +5639,12 @@ public protocol TerminalTmuxDelegate: AnyObject {
     /// not an exact count — clients that need the pane count should query
     /// `#{window_panes}` separately.
     func tmuxLayoutChanged(source: Terminal, windowId: String, cols: Int, rows: Int, hasSplits: Bool)
+    /// called on `%session-window-changed` / `%window-pane-changed`, i.e. when
+    /// the active window or pane changed server-side (for example via the tmux
+    /// prefix key typed into the pane). the newly active pane's content is not
+    /// in the buffer and should be re-captured, and an SFSTATE query should
+    /// refresh `currentTmuxPaneId` so its output passes the active-pane filter.
+    func tmuxActiveWindowChanged(source: Terminal)
 }
 
 public extension TerminalTmuxDelegate {
@@ -5605,6 +5652,7 @@ public extension TerminalTmuxDelegate {
     func tmuxResizeCompleted(source: Terminal) {}
     func tmuxSubscriptionChanged(source: Terminal, id: String, sessionId: String, windowId: String, paneId: String, value: String) {}
     func tmuxLayoutChanged(source: Terminal, windowId: String, cols: Int, rows: Int, hasSplits: Bool) {}
+    func tmuxActiveWindowChanged(source: Terminal) {}
 }
 
 // Default implementations
