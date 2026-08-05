@@ -771,8 +771,9 @@ open class Terminal {
     }
 
     // returns the raw terminfo/termcap value for capabilities we advertise via
-    // XTGETTCAP (DCS + q), or nil for capabilities we do not report. names use
-    // the termcap 2-letter form that clients query (e.g. "Ms", "Co").
+    // XTGETTCAP (DCS + q), or nil for capabilities we do not report. names are
+    // either the termcap 2-letter form (e.g. "Ms", "Co") or the extended
+    // terminfo name clients query them by (e.g. "Sync").
     func termcapValue (for name: [UInt8]) -> [UInt8]?
     {
         switch String (bytes: name, encoding: .ascii) {
@@ -782,6 +783,12 @@ open class Terminal {
             // OSC 52 set-selection format string: \E]52;%p1%s;%p2%s\007
             // we support OSC 52 copy (see oscClipboard)
             return [0x1b] + Array ("]52;%p1%s;%p2%s".utf8) + [0x07]
+        case "Sync":
+            // synchronized output, called with p1=1 to begin a frame and p1=2 to end it,
+            // emitting \E[?2026h and \E[?2026l respectively. tmux reads this to decide
+            // whether it may wrap its own flushes in synchronized-output markers; without
+            // it tmux assumes we cannot and we end up painting every intermediate frame.
+            return [0x1b] + Array ("[?2026%?%p1%{1}%-%tl%eh%;".utf8)
         default:
             return nil
         }
@@ -1151,7 +1158,7 @@ open class Terminal {
         parser.csiHandlers [UInt8 (ascii: "m")] = cmdCharAttributes
         parser.csiHandlers [UInt8 (ascii: "n")] = cmdDeviceStatus
         parser.csiHandlers [UInt8 (ascii: "p")] = csiPHandler
-        parser.csiHandlers [UInt8 (ascii: "q")] = cmdSetCursorStyle
+        parser.csiHandlers [UInt8 (ascii: "q")] = csiQ
         parser.csiHandlers [UInt8 (ascii: "r")] = cmdSetScrollRegion
         parser.csiHandlers [UInt8 (ascii: "s")] = { args, cstring in
             // "CSI s" is overloaded, can mean save cursor, but also set the margins with DECSLRM
@@ -3297,6 +3304,31 @@ open class Terminal {
     //   Ps = 5  -> blinking bar (xterm).
     //   Ps = 6  -> steady bar (xterm).
     //
+    // Dispatcher for CSI .* q commands
+    func csiQ (_ pars: [Int], _ collect: cstring)
+    {
+        if collect == [UInt8 (ascii: ">")] {
+            cmdReportVersion (pars)
+        } else {
+            cmdSetCursorStyle (pars, collect)
+        }
+    }
+
+    // XTVERSION - report terminal name and version, xterm.
+    // CSI > Ps q, answered with DCS > | text ST
+    //
+    // only answered when the embedder supplied options.xtversion, since claiming
+    // an identity we cannot back up is worse than staying quiet.  tmux matches
+    // this reply against a list of terminals it knows and turns on features for
+    // them, so the name has to stay stable once something depends on it.
+    func cmdReportVersion (_ pars: [Int])
+    {
+        guard pars.isEmpty || pars [0] == 0, let version = options.xtversion else {
+            return
+        }
+        sendResponse (cc.DCS, ">|\(version)", cc.ST)
+    }
+
     func cmdSetCursorStyle (_ pars: [Int], _ collect: cstring)
     {
         if (collect != [32]){ /* space */
@@ -3330,12 +3362,37 @@ open class Terminal {
             cmdSoftReset ()
         case [UInt8 (ascii: "\"")]:
             cmdSetConformanceLevel (pars, collect)
+        case [UInt8 (ascii: "?"), UInt8 (ascii: "$")]:
+            cmdRequestPrivateMode (pars)
         default:
             ()
             // log ("Unhandled CSI \(String (cString: collect)) with pars=\(pars)")
         }
     }
-    
+
+    // DECRQM - Request DEC Private Mode
+    // CSI ? Ps $ p, answered with CSI ? Ps ; Pv $ y where Pv is
+    //   0 = not recognized, 1 = set, 2 = reset, 3 = permanently set, 4 = permanently reset.
+    //
+    // we deliberately answer only for modes we track, and stay silent otherwise.
+    // reporting 0 for everything else would be worse than silence: we do support
+    // several private modes (bracketed paste, alt screen, mouse reporting) without
+    // tracking them here, and telling a client they are unrecognized would make it
+    // turn off features that actually work.
+    func cmdRequestPrivateMode (_ pars: [Int])
+    {
+        guard let mode = pars.first else { return }
+        let value: Int
+        switch mode {
+        case 2026:
+            // synchronized output, see setMode/resetMode
+            value = synchronizedOutputMode ? 1 : 2
+        default:
+            return
+        }
+        sendResponse (cc.CSI, "?\(mode);\(value)$y")
+    }
+
     // CSI Pl ; Pc " p
     // Set conformance level (DECSCL), VT220 and up
     func cmdSetConformanceLevel (_ pars: [Int], _ collect: cstring)
