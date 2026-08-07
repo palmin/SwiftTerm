@@ -296,15 +296,30 @@ class EscapeSequenceParser {
     var initialState: ParserState = .ground
     var currentState: ParserState = .ground
     
-#if DEBUG
+    // Entering or leaving control mode cuts off whatever notification the parser
+    // was midway through, so none of the accumulation buffers may survive the
+    // switch. A leftover partial line gets prepended to the next session's first
+    // read and corrupts its first notification, and a leftover block identifier
+    // is worse: every later line accumulates as block content, waiting for an
+    // %end that died with the old session.
+    //
+    // This is the single place that resets them. The three call sites that move
+    // the mode had drifted apart, with %exit clearing nothing at all.
     var tmuxCommandMode = false {
         didSet {
+            // a repeated DCS 1000p inside a live session must not discard a
+            // partial line the parser is legitimately holding
+            guard oldValue != tmuxCommandMode else {
+                return
+            }
+#if DEBUG
             print("tmuxCommandMode = \(tmuxCommandMode)")
+#endif
+            unusedTmuxData.removeAll()
+            tmuxBlockIdentifier = nil
+            tmuxBlockContent.removeAll()
         }
     }
-#else
-    var tmuxCommandMode = false
-#endif
     
     // buffers over several calls
     var _osc: cstring
