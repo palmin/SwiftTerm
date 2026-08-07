@@ -431,7 +431,7 @@ class EscapeSequenceParser {
         while !data.isEmpty {
             if tmuxCommandMode {
                 if !unusedTmuxData.isEmpty {
-                    data.insert(contentsOf: unusedTmuxData, at: 0)
+                    data.insert(contentsOf: unusedTmuxData, at: data.startIndex)
                     unusedTmuxData.removeAll()
                 }
                                 
@@ -590,11 +590,13 @@ class EscapeSequenceParser {
                 }
                 
             } else {
+                // parse2 returns an index into data, not a count, which is why
+                // this compares against endIndex and suffix(from:) takes it as is
                 let consumed = parse2(data: data)
-                if consumed >= data.count {
+                if consumed >= data.endIndex {
                     break
                 }
-        
+
                 data = data.suffix(from: consumed)
             }
         }
@@ -620,7 +622,9 @@ class EscapeSequenceParser {
             
         // process input string
         var i = data.startIndex
-        let len = data.count
+        // an end index, not a count: i starts at startIndex and every use below
+        // slices with it, so this must not be data.count on a rebased slice
+        let len = data.endIndex
         while i < len {
             if startingTmuxMode != tmuxCommandMode {
                 return i
