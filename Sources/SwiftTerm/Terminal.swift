@@ -5119,10 +5119,16 @@ open class Terminal {
         // origin mode (DECOM)
         if let v = dict["origin_flag"] { originMode = v == "1" }
 
-        // scroll region
+        // scroll region. These arrive verbatim from a tmux state query, so hold
+        // them to the same rule DECSTBM enforces: on screen and at least two
+        // lines tall. A degenerate region reaches shiftElements as count <= 0.
         if let top = int("scroll_region_upper"), let bottom = int("scroll_region_lower") {
-            buffer.scrollTop = top
-            buffer.scrollBottom = bottom
+            let clampedTop = max(0, min(top, rows - 1))
+            let clampedBottom = max(0, min(bottom, rows - 1))
+            if clampedTop < clampedBottom {
+                buffer.scrollTop = clampedTop
+                buffer.scrollBottom = clampedBottom
+            }
         }
 
         // alternate screen
@@ -5683,8 +5689,14 @@ open class Terminal {
                 let fillData = CharData(attribute: eraseAttr(), char: " ")
                 scrollWithinHorizontalMargins(up: false, topRow: topRow, bottomRow: bottomRow, fillData: fillData)
             } else {
+                // a one-line scroll region has nothing to shift down, and
+                // shiftElements requires count > 0. The blank line below still
+                // applies, which is the whole of a reverse index in that case.
+                // This mirrors the guard the forward scroll already has.
                 let scrollRegionHeight = buffer.scrollBottom - buffer.scrollTop
-                buffer.lines.shiftElements (start: topRow, count: scrollRegionHeight, offset: 1)
+                if scrollRegionHeight > 0 {
+                    buffer.lines.shiftElements (start: topRow, count: scrollRegionHeight, offset: 1)
+                }
                 buffer.lines [topRow] = buffer.getBlankLine (attribute: eraseAttr ())
             }
             updateRange (buffer.scrollTop)
