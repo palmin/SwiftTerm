@@ -1161,6 +1161,11 @@ open class Terminal {
         parser.csiHandlers [UInt8 (ascii: "q")] = csiQ
         parser.csiHandlers [UInt8 (ascii: "r")] = cmdSetScrollRegion
         parser.csiHandlers [UInt8 (ascii: "s")] = { args, cstring in
+            // xterm's XTSAVE (CSI ? Pm s) is neither DECSLRM nor SCOSC and
+            // must not clobber the saved cursor position a later CSI u restores
+            if cstring != [] {
+                return
+            }
             // "CSI s" is overloaded, can mean save cursor, but also set the margins with DECSLRM
             if self.marginMode {
                 self.cmdSetMargins (args, cstring)
@@ -2749,6 +2754,14 @@ open class Terminal {
     //
 
     func cmdRestoreCursor (_ pars: [Int], _ collect: cstring) {
+        // only plain CSI u is SCORC (restore cursor); the same final byte
+        // carries the kitty keyboard protocol (CSI ? u query, CSI > flags u
+        // push, CSI < flags u pop, CSI = flags ; mode u set), and executing
+        // those as a restore teleports the cursor to whatever was last saved,
+        // (0,0) when nothing ever was
+        if collect != [] {
+            return
+        }
         buffer.x = buffer.savedX
         buffer.y = buffer.savedY
         curAttr = buffer.savedAttr
@@ -3728,6 +3741,12 @@ open class Terminal {
     //
     func cmdCharAttributes (_ pars: [Int], _ collect: cstring)
     {
+        // a collect prefix means XTMODKEYS/XTQMODKEYS (CSI > Pm m, CSI ? Pm m),
+        // not SGR; applying those as attributes turns key-modifier probes into
+        // stray underline/color state
+        if collect != [] {
+            return
+        }
         // Optimize a single SGR0.
         if pars.count == 1 && pars [0] == 0 {
             curAttr = CharData.defaultAttr
