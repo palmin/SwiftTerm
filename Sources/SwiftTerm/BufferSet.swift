@@ -42,6 +42,7 @@ class BufferSet {
         if active === normal {
             return
         }
+        terminal?.feedStats.appTransition = true
         normal.x = alt.x
         normal.y = alt.y
         
@@ -69,7 +70,8 @@ class BufferSet {
         if active === alt {
             return
         }
-        
+        terminal?.feedStats.appTransition = true
+
         alt.x = normal.x
         alt.y = normal.y
         // Since the alt buffer is always cleared when the normal buffer is

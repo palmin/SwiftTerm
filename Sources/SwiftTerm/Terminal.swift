@@ -310,6 +310,25 @@ open class Terminal {
     var savedReverseWraparound: Bool = false
     var tdel : TerminalDelegate!
     public weak var tmuxDelegate: TerminalTmuxDelegate?
+
+    /// Cheap per-feed activity counters for the render layer: how many visible
+    /// glyphs were inserted and how many line-erase operations (EL/ED) ran
+    /// since the last reset, plus whether the feed switched screen buffers or
+    /// wiped the display. A feed that erases lines without printing a single
+    /// glyph is one half of an erase-then-redraw repaint cycle, which is what
+    /// a client needs to recognize to coalesce rendering; a buffer switch or
+    /// full clear signals the foreground application changed.
+    public struct FeedStats {
+        public var glyphs = 0
+        public var lineErases = 0
+        public var appTransition = false
+    }
+    public internal(set) var feedStats = FeedStats()
+
+    public func resetFeedStats () {
+        feedStats = FeedStats()
+    }
+
     var curAttr : Attribute = CharData.defaultAttr
     var gLevel: UInt8 = 0
     var cursorBlink: Bool = false
@@ -1798,6 +1817,7 @@ open class Terminal {
     // the rules for wrapping around, scrolling and overflow expected in the terminal.
     func insertCharacter (_ charData: CharData)
     {
+        feedStats.glyphs += 1
         var chWidth = Int (charData.width)
 #if xxx_DEBUG
         print("insertCharacter y = \(buffer.y): \(charData.getCharacter(graphemes))")
@@ -2500,8 +2520,9 @@ open class Terminal {
     //
     func cmdEraseInLine (_ pars: [Int], _ collect: cstring)
     {
+        feedStats.lineErases += 1
         let p = pars.count == 0 ? 0 : pars [0]
-        
+
         switch p {
         case 0:
             eraseInBufferLine (y: buffer.y, start: buffer.x, end: cols)
@@ -2529,7 +2550,14 @@ open class Terminal {
     //
     func cmdEraseInDisplay (_ pars: [Int], _ collect: cstring)
     {
+        feedStats.lineErases += 1
         let p = pars.count == 0 ? 0 : pars [0]
+        if p == 2 || p == 3 {
+            // wiping the whole display (or scrollback) is how shells clear and
+            // how full-screen apps hand the screen over; either way the
+            // erase-then-redraw habit of the previous application is over
+            feedStats.appTransition = true
+        }
         var j: Int
         switch p {
         case 0:
@@ -5012,6 +5040,7 @@ open class Terminal {
 #if DEBUG
         print("tmux: resetToInitialState called yBase=\(buffer.yBase) lines=\(buffer.lines.count)")
 #endif
+        feedStats.appTransition = true
         options.rows = rows
         options.cols = cols
         let savedCursorHidden = cursorHidden
