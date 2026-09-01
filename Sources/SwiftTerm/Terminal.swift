@@ -277,6 +277,25 @@ open class Terminal {
     var applicationKeypad : Bool = false
     // Whether the terminal is operating in application cursor mode
     public var applicationCursor : Bool = false
+
+    // kitty keyboard protocol flag stacks, one per screen so an application
+    // that pushes flags on the alternate screen (nvim does) cannot leave the
+    // shell's main screen stuck in the mode if it dies without popping.
+    // each stack has a base entry of 0 that pop never removes.
+    var kittyKeyboardStackMain: [Int] = [0]
+    var kittyKeyboardStackAlt: [Int] = [0]
+
+    // the kitty keyboard protocol progressive-enhancement bits we implement;
+    // 1 is "disambiguate escape codes" which sends the Esc key as CSI 27 u
+    // and meta-modified keys as CSI codepoint;modifiers u so that a raw ESC
+    // byte followed by a key can no longer be mistaken for a meta chord
+    static let supportedKittyKeyboardFlags = 1
+
+    /// Active kitty keyboard protocol flags for the current screen
+    public var kittyKeyboardFlags: Int {
+        let alt = buffers?.isAlternateBuffer ?? false
+        return (alt ? kittyKeyboardStackAlt : kittyKeyboardStackMain).last ?? 0
+    }
     
     // You can ignore most of the defaults set here, the function
     // reset() will do that again
@@ -616,6 +635,8 @@ open class Terminal {
         wraparound = true
         savedWraparound = wraparound
         bracketedPasteMode = false
+        kittyKeyboardStackMain = [0]
+        kittyKeyboardStackAlt = [0]
 
         // charset'
         charset = nil
@@ -2788,6 +2809,7 @@ open class Terminal {
         // those as a restore teleports the cursor to whatever was last saved,
         // (0,0) when nothing ever was
         if collect != [] {
+            cmdKittyKeyboard (pars, collect)
             return
         }
         buffer.x = buffer.savedX
@@ -2798,6 +2820,62 @@ open class Terminal {
         marginMode = savedMarginMode
         wraparound = savedWraparound
         reverseWraparound = savedReverseWraparound
+    }
+
+    // kitty keyboard protocol flag management on the current screen's stack:
+    //   CSI ? u             query, answered with CSI ? flags u
+    //   CSI > flags u       push flags (flags defaults to 0)
+    //   CSI < count u       pop count entries (count defaults to 1)
+    //   CSI = flags ; mode u  alter the current entry (1=set, 2=or, 3=and-not)
+    // clients detect support by the query answer arriving before the primary
+    // DA response, which holds because both replies are produced in parse order
+    func cmdKittyKeyboard (_ pars: [Int], _ collect: cstring) {
+        func withActiveStack (_ body: (inout [Int]) -> ()) {
+            if buffers?.isAlternateBuffer ?? false {
+                body (&kittyKeyboardStackAlt)
+            } else {
+                body (&kittyKeyboardStackMain)
+            }
+        }
+
+        switch collect.first {
+        case UInt8 (ascii: "?"):
+            sendResponse (cc.CSI, "?\(kittyKeyboardFlags)u")
+        case UInt8 (ascii: ">"):
+            let flags = (pars.first ?? 0) & Terminal.supportedKittyKeyboardFlags
+            withActiveStack { stack in
+                stack.append (flags)
+                // bound runaway pushes the way kitty does: evict the oldest
+                // pushed entry but keep the base entry at the bottom
+                if stack.count > 32 {
+                    stack.remove (at: 1)
+                }
+            }
+        case UInt8 (ascii: "<"):
+            let count = max (1, pars.first ?? 1)
+            withActiveStack { stack in
+                // the base entry of 0 stays so over-popping lands on defaults
+                stack.removeLast (min (count, stack.count - 1))
+            }
+        case UInt8 (ascii: "="):
+            let flags = (pars.first ?? 0) & Terminal.supportedKittyKeyboardFlags
+            let mode = pars.count > 1 ? pars [1] : 1
+            withActiveStack { stack in
+                let current = stack.last ?? 0
+                let updated: Int
+                switch mode {
+                case 2:
+                    updated = current | flags
+                case 3:
+                    updated = current & ~flags
+                default:
+                    updated = flags
+                }
+                stack [stack.count - 1] = updated
+            }
+        default:
+            log ("Unknown CSI u variant (collect=\(collect) pars=\(pars))")
+        }
     }
 
     //
@@ -3484,6 +3562,8 @@ open class Terminal {
         reverseWraparound = false
         savedReverseWraparound = false
         wraparound = true  // defaults: xterm - true, vt100 - false
+        kittyKeyboardStackMain = [0]
+        kittyKeyboardStackAlt = [0]
         applicationKeypad = false
         syncScrollArea ()
         applicationCursor = false
@@ -3547,6 +3627,7 @@ open class Terminal {
 
         print("--- keyboard ---")
         print("conformance: \(conformance)")
+        print("kittyKeyboardFlags: \(kittyKeyboardFlags) (main stack: \(kittyKeyboardStackMain), alt stack: \(kittyKeyboardStackAlt))")
 
         print("--- charset ---")
         print("gLevel: \(gLevel), gcharset: \(gcharset), charset: \(charset?.description ?? "nil")")
@@ -4350,6 +4431,11 @@ open class Terminal {
             case 47: // alt screen buffer
                 fallthrough
             case 1047: // alt screen buffer
+                // the alternate screen starts with default keyboard flags; an
+                // application that pushed kitty keyboard flags in a previous
+                // alt-screen session and died without popping must not haunt
+                // the next full-screen application
+                kittyKeyboardStackAlt = [0]
                 buffers!.activateAltBuffer (fillAttr: nil)
                 refresh (startRow: 0, endRow: rows - 1)
                 syncScrollArea ()
