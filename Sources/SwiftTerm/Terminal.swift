@@ -662,7 +662,7 @@ open class Terminal {
         xtermTitleSetHex = false
         xtermTitleQueryHex = false
         
-        hyperLinkTracking = nil
+        currentHyperlink = nil
         cursorBlink = false
         hostCurrentDirectory = nil
         lineFeedMode = options.convertEol
@@ -1815,7 +1815,10 @@ open class Terminal {
             //if screenReaderMode {
             //    emitChar (ch)
             //}
-            let charData = makeCharData (attribute: curAttr, char: ch, size: Int8 (chWidth))
+            var charData = makeCharData (attribute: curAttr, char: ch, size: Int8 (chWidth))
+            if let link = currentHyperlink {
+                charData.setPayload (atom: link)
+            }
             insertCharacter (charData)
         }
         updateRange (buffer.y)
@@ -2100,40 +2103,33 @@ open class Terminal {
         }
     }
 
-    var hyperLinkTracking: (start: Position, payload: String)? = nil
-    
+    /// OSC 8 hyperlink in effect for characters printed from now on, nil while
+    /// no link is open. The link is part of the attribute state the way SGR is:
+    /// every cell printed while it is set carries it and nothing else does. The
+    /// previous implementation remembered the cursor position at the open and
+    /// stamped every cell from there to the cursor at the close, which linked
+    /// cells the application never wrote inside the link (rows crossed by
+    /// cursor movement, the cell after the last character, and with scrollback
+    /// present the rest of the last row) and left those stale on later
+    /// diff-based repaints.
+    var currentHyperlink: TinyAtom? = nil
+
+    /// OSC 8 ; params ; URI ST opens a link, an empty URI closes it. The atom
+    /// payload keeps the raw `params;URI` text so consumers can read the id.
     func oscHyperlink (_ data: ArraySlice<UInt8>)
     {
-        let buffer = self.buffer
-        if data.count == 1 && data [data.startIndex] == UInt8 (ascii: ";") {
-            // We only had the terminator, so we can close ";"
-            if let hlt = hyperLinkTracking {
-                let str = hlt.payload
-                if let urlToken = atoms.lookup (value: str) {
-                    //print ("Setting the text from \(hlt.start) to \(buffer.x) on line \(buffer.y+buffer.yBase) to \(str)")
-                    
-                    // Between the time the flag was set, and now `y` might have changed negatively,
-                    // in that case, we do not flag any sequence as a hyperlink
-                    if hlt.start.row <= buffer.y+buffer.yBase {
-                        for y in hlt.start.row...(buffer.y+buffer.yBase) {
-                            let line = buffer.lines [y]
-                            let startCol = y == hlt.start.row ? min (hlt.start.col, cols-1) : 0
-                            let endCol = y == buffer.y ? min (buffer.x, cols-1) : (marginMode ? buffer.marginRight : cols-1)
-                            if endCol > startCol {
-                                for x in startCol...endCol {
-                                    var cd = line [x]
-                                    cd.setPayload(atom: urlToken)
-                                    line [x] = cd
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            hyperLinkTracking = nil
+        let uri: ArraySlice<UInt8>
+        if let separator = data.firstIndex (of: UInt8 (ascii: ";")) {
+            uri = data [data.index (after: separator)...]
         } else {
-            hyperLinkTracking = (start: Position(col: buffer.x, row: buffer.y+buffer.yBase), payload: String (bytes:data, encoding: .ascii) ?? "")
+            uri = data
         }
+        if uri.isEmpty {
+            currentHyperlink = nil
+            return
+        }
+        let payload = String (bytes: data, encoding: .utf8) ?? ""
+        currentHyperlink = atoms.lookup (value: payload)
     }
     
     // Copy to clipboard with sequence on the form:
@@ -3579,7 +3575,7 @@ open class Terminal {
         charset = nil
         setgLevel (0)
         conformance = .vt500
-        hyperLinkTracking = nil
+        currentHyperlink = nil
         lineFeedMode = options.convertEol
         resetAllColors()
         tdel.showCursor(source: self)
