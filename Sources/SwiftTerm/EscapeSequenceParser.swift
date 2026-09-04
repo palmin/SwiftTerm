@@ -287,6 +287,10 @@ class EscapeSequenceParser {
     // screen/tmux title (ESC k <title> ST), routed via the OSC string collector
     var screenTitleHandler: OscHandler = { _ in }
     var oscIsScreenTitle = false
+    // true while dispatching an OSC that was terminated with BEL rather than ST,
+    // so replies to OSC queries can mirror the terminator the request used the
+    // way xterm does; only valid inside an OscHandler
+    var oscTerminatedWithBel = false
     var executeHandlers: [UInt8:ExecuteHandler] = [:]
     var escHandlers: [cstring:EscHandler] = [:]
     var dcsHandlers: [cstring:DcsHandler] = [:]
@@ -855,6 +859,7 @@ class EscapeSequenceParser {
                 }
                 i = j - 1
             case .oscEnd:
+                oscTerminatedWithBel = code == ControlCodes.BEL
                 if oscIsScreenTitle {
                     // whole buffer is the title, no OSC code prefix
                     if osc.count != 0 && code != ControlCodes.CAN && code != ControlCodes.SUB {

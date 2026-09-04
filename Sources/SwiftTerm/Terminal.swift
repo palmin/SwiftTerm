@@ -191,10 +191,26 @@ public protocol TerminalDelegate {
     
     /**
      * This should return the current foreground and background colors to
-     * report.
+     * report.   These answer the OSC 10 and OSC 11 queries, so a front-end that
+     * renders with its own colors rather than the ones the engine tracks should
+     * return what it actually draws.
      */
     func getColors (source: Terminal) -> (foreground: TermColor, background: TermColor)
-    
+
+    /**
+     * This should return the color the cursor is drawn with, to answer the OSC 12
+     * query.   Returning nil reports the text foreground color, which is what
+     * xterm uses when no cursor color has been configured.
+     */
+    func getCursorColor (source: Terminal) -> TermColor?
+
+    /**
+     * This should return the color used for the 0..255 palette entry `index` to
+     * answer the OSC 4 query, so the reply describes what is being rendered
+     * rather than the palette the engine keeps.
+     */
+    func getPaletteColor (source: Terminal, index: Int) -> TermColor
+
     /**
     * This method is invoked when the client application (iTerm2) has issued a OSC 1337.
     *
@@ -1275,6 +1291,7 @@ open class Terminal {
         //  11 - Change VT100 text background color to Pt.
         parser.oscHandlers [11] = oscSetTextBackground
         //  12 - Change text cursor color to Pt.
+        parser.oscHandlers [12] = oscSetCursorColor
         //  13 - Change mouse foreground color to Pt.
         //  14 - Change mouse background color to Pt.
         //  15 - Change Tektronix foreground color to Pt.
@@ -2220,7 +2237,7 @@ open class Terminal {
         
             // If the request is a query, reply with the current color definition
             if p+1 < data.endIndex && data [p+1] == UInt8 (ascii: "?") {
-                sendResponse (cc.OSC, "4;\(color);\(ansiColors [color].formatAsXcolor())", cc.ST)
+                sendOscColorResponse ("4;\(color)", tdel.getPaletteColor (source: self, index: color))
                 parsePos = p+2
                 if parsePos < data.endIndex && data [parsePos] == UInt8(ascii: ";"){
                     parsePos += 1
@@ -2245,8 +2262,28 @@ open class Terminal {
         //log ("Attempt to set the text Foreground color \(str)")
     }
     
+    /// OSC 4, 10, 11 and 12 all accept "?" in place of a color specification to
+    /// query the color currently in effect
+    func isOscColorQuery (_ data: ArraySlice<UInt8>) -> Bool
+    {
+        return data.first == UInt8 (ascii: "?")
+    }
+
+    /// Answers an OSC color query, e.g. `ESC ] 11 ; rgb:1c1c/1c1c/1c1c ST`, using
+    /// the same terminator the query arrived with the way xterm does, since
+    /// applications that ask with BEL tend to scan for BEL in the reply.
+    func sendOscColorResponse (_ code: String, _ color: TermColor)
+    {
+        let terminator = parser.oscTerminatedWithBel ? [ControlCodes.BEL] : cc.ST
+        sendResponse (cc.OSC, "\(code);\(color.formatAsXcolor())", terminator)
+    }
+
     func oscSetTextForeground (_ data: ArraySlice<UInt8>)
     {
+        if isOscColorQuery (data) {
+            sendOscColorResponse ("10", tdel.getColors (source: self).foreground)
+            return
+        }
         if let foreground = TermColor.parseColor(data) {
             foregroundColor = foreground
             tdel.setForegroundColor(source: self, color: foreground)
@@ -2255,10 +2292,25 @@ open class Terminal {
 
     func oscSetTextBackground (_ data: ArraySlice<UInt8>)
     {
+        if isOscColorQuery (data) {
+            sendOscColorResponse ("11", tdel.getColors (source: self).background)
+            return
+        }
         if let background = TermColor.parseColor(data) {
             backgroundColor = background
             tdel.setBackgroundColor(source: self, color: background)
         }
+    }
+
+    /// OSC 12 sets the cursor color, which we do not track, but the query is
+    /// answered so applications probing the cursor are not left waiting
+    func oscSetCursorColor (_ data: ArraySlice<UInt8>)
+    {
+        guard isOscColorQuery (data) else {
+            return
+        }
+        let cursor = tdel.getCursorColor (source: self) ?? tdel.getColors (source: self).foreground
+        sendOscColorResponse ("12", cursor)
     }
 
     //
@@ -5979,7 +6031,20 @@ public extension TerminalDelegate {
     {
         return (source.foregroundColor, source.backgroundColor)
     }
-    
+
+    func getCursorColor (source: Terminal) -> TermColor?
+    {
+        return nil
+    }
+
+    func getPaletteColor (source: Terminal, index: Int) -> TermColor
+    {
+        guard index >= 0 && index < source.ansiColors.count else {
+            return source.foregroundColor
+        }
+        return source.ansiColors [index]
+    }
+
     func setForegroundColor (source: Terminal, color: TermColor)
     {
         source.foregroundColor = color
