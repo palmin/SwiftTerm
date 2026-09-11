@@ -826,6 +826,43 @@ open class Terminal {
         }
     }
 
+    // DCS = 1 s ST begins and DCS = 2 s ST ends a synchronized update: the
+    // form of synchronized output that predates mode 2026 and that tmux up to
+    // 3.3 emits around each of its redraws when it believes the terminal
+    // supports it. Treating it as the mode 2026 switch means an erase and its
+    // repaint inside one tmux update reach the screen together instead of as
+    // separate frames. The sequence carries no payload.
+    class SynchronizedUpdateDcs : DcsHandler {
+        var terminal: Terminal
+
+        public init (terminal: Terminal)
+        {
+            self.terminal = terminal
+        }
+
+        func hook (collect: cstring, parameters: [Int],  flag: UInt8)
+        {
+            switch parameters.first {
+            case 1:
+                terminal.synchronizedOutputMode = true
+                terminal.tdel.synchronizedOutputModeChanged (source: terminal, enabled: true)
+            case 2:
+                terminal.synchronizedOutputMode = false
+                terminal.tdel.synchronizedOutputModeChanged (source: terminal, enabled: false)
+            default:
+                break
+            }
+        }
+
+        func put (data : ArraySlice<UInt8>)
+        {
+        }
+
+        func unhook ()
+        {
+        }
+    }
+
     // returns the raw terminfo/termcap value for capabilities we advertise via
     // XTGETTCAP (DCS + q), or nil for capabilities we do not report. names are
     // either the termcap 2-letter form (e.g. "Ms", "Co") or the extended
@@ -1371,6 +1408,7 @@ open class Terminal {
         parser.setDcsHandler ("$q", DECRQSS (terminal: self))
         parser.setDcsHandler ("q", SixelDcsHandler (terminal: self))
         parser.setDcsHandler ("+q", XTGETTCAP (terminal: self))
+        parser.setDcsHandler ("=s", SynchronizedUpdateDcs (terminal: self))
         parser.dscHandlerFallback = { [weak self, weak parser] code, parameters in
             if let parser = parser {
                 let character = Character(UnicodeScalar(code))
