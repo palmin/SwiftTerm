@@ -3367,31 +3367,33 @@ open class Terminal {
             tdel.windowCommand(source: self, command: .switchToFullScreen)
         case [10, 2]:
             tdel.windowCommand(source: self, command: .toggleFullScreen)
-        case [15]: // Report size in pixels
+        // the geometry reports below can only be answered by the front-end: the
+        // engine knows the grid but nothing about the pixels it is drawn with.
+        // where the front-end has no answer we stay silent rather than invent
+        // one, for the same reason DECRQM does: a made-up size makes a client
+        // place images and pixel mouse coordinates wrong, which is worse than
+        // it falling back to the size in characters it can still ask for.
+        case [14]: // report text area size in pixels
+            if let r = tdel.windowCommand(source: self, command: .reporttextAreaPixelDimension) {
+                sendResponse(r)
+            }
+        case [15]: // report screen size in pixels
             if let r = tdel.windowCommand(source: self, command: .reportSizeOfScreenInPixels) {
                 sendResponse(r)
-            } else {
-                sendResponse (cc.CSI, "5;768;1024t")
             }
-        case [16]: // Report cell size in pixels
-            // If no value is returned send 16x10
-            // TODO: should surface that to the UI, should not do this here
+        case [16]: // report cell size in pixels
             if let r = tdel.windowCommand(source: self, command: .reportCellSizeInPixels) {
                 sendResponse(r)
-            } else {
-                sendResponse (cc.CSI, "6;16;10t")
             }
-        case [18]:
-            if let r = tdel.windowCommand(source: self, command: .reportCellSizeInPixels) {
+        case [18]: // report text area size in characters
+            if let r = tdel.windowCommand(source: self, command: .reportTextAreaCharacters) {
                 sendResponse(r)
             } else {
                 sendResponse(cc.CSI, "8;\(rows);\(cols)t")
             }
-        case [19]:
+        case [19]: // report screen size in characters
             if let r = tdel.windowCommand(source: self, command: .reportScreenSizeCharacters) {
                 sendResponse(r)
-            } else {
-                sendResponse(cc.CSI, "9;\(rows);\(cols)t")
             }
         case [20]:
             // Do not report the actual title back, as it can be exploited,
