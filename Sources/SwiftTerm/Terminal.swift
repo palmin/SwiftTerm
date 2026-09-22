@@ -5837,10 +5837,17 @@ open class Terminal {
      */
     public func sendEvent (buttonFlags: Int, x: Int, y: Int)
     {
+        // an application discards a report that falls outside the grid, and the
+        // pointer leaving the terminal mid-drag then loses the button release:
+        // tmux drops a drag end sent for row 0 and stays in copy mode with the
+        // selection hanging. clamp to the edge, which is what xterm reports when
+        // the pointer is dragged out of the window
+        let x = min(max(0, x), max(0, cols - 1))
+        let y = min(max(0, y), max(0, rows - 1))
 #if DEBUG
         NSLog("sendEvent: buttonFlags=\(buttonFlags), x=\(x), y=\(y), protocol=\(mouseProtocol)")
 #endif
-        
+
         //print ("got \(mouseProtocol)")
         switch mouseProtocol {
         case .x10:
