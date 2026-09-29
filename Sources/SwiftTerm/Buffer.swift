@@ -169,8 +169,17 @@ class Buffer {
         
         let len = hasScrollback ? (terminal.options.scrollback) + rows : rows
         _lines = CircularList<BufferLine> (maxLength: len)
-        _lines.makeEmpty = makeEmptyLine
+        setMakeEmpty ()
         setupTabStops ()
+    }
+
+    // the buffer owns the list, so the list must not retain the buffer or a
+    // buffer dropped by a full reset is never freed
+    func setMakeEmpty ()
+    {
+        _lines.makeEmpty = { [weak self] line in
+            self?.makeEmptyLine (line) ?? BufferLine (cols: 1)
+        }
     }
     
     // remove references back to Terminal to break retain loops,
@@ -231,7 +240,7 @@ class Buffer {
         y = 0
         
         _lines = CircularList<BufferLine> (maxLength: getCorrectBufferLength(terminal.rows))
-        _lines.makeEmpty = makeEmptyLine
+        setMakeEmpty ()
         scrollTop = 0
         scrollBottom = terminal.rows - 1
         
