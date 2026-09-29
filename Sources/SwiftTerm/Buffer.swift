@@ -543,7 +543,7 @@ class Buffer {
 
             // Copy buffer data to new locations
             var destLineIndex = 0
-            var destCol = getWrappedLineTrimmedLength (lines, destLineIndex, oldCols)
+            var destCol = getWrappedLineTrimmedLength (wrappedLines, destLineIndex, oldCols)
             var srcLineIndex = 1
             var srcCol = 0
             while srcLineIndex < wrappedLines.count {
@@ -570,7 +570,7 @@ class Buffer {
                 }
 
                 // Make sure the last cell isn't wide, if it is copy it to the current dest
-                if destCol == 0 && destLineIndex != 0 {
+                if destCol == 0 && destLineIndex != 0 && destLineIndex < wrappedLines.count {
                     if wrappedLines [destLineIndex - 1].getWidth(index: newCols - 1) == 2 {
                         wrappedLines [destLineIndex].copyFrom (wrappedLines [destLineIndex - 1], srcCol: newCols - 1, dstCol: destCol, len: 1)
                         destCol += 1
@@ -580,8 +580,11 @@ class Buffer {
                 }
             }
 
-            // Clear out remaining cells or fragments could remain;
-            wrappedLines [destLineIndex].replaceCells (start: destCol, end: newCols, fillData: nullChar)
+            // Clear out remaining cells or fragments could remain; a wide character
+            // pushed to the next line can fill the last one exactly
+            if destLineIndex < wrappedLines.count {
+                wrappedLines [destLineIndex].replaceCells (start: destCol, end: newCols, fillData: nullChar)
+            }
 
             // Work backwards and remove any rows at the end that only contain null cells
             var countToRemove = 0
