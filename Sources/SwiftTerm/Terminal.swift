@@ -2620,7 +2620,12 @@ open class Terminal {
         let buffer = self.buffer
         let param = max (pars.count > 0 ? pars [0] : 1, 1)
 
-        buffer.x = (usingMargins() ? buffer.marginLeft : 0) + min (param - 1, cols - 1)
+        if usingMargins() {
+            // with origin mode the column counts from the left margin and stops at the right one
+            buffer.x = min (buffer.marginLeft + min (param - 1, cols - 1), buffer.marginRight)
+        } else {
+            buffer.x = min (param - 1, cols - 1)
+        }
     }
 
     //
