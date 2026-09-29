@@ -2743,9 +2743,10 @@ open class Terminal {
         if buffer.y < buffer.scrollTop || buffer.y > buffer.scrollBottom {
             return
         }
-        var p = max (pars.count == 0 ? 1 : pars [0], 1)
+        // no point inserting more lines than the available rows, as in cmdDeleteLines
+        var p = min (buffer.rows+1, max (pars.count == 0 ? 1 : pars [0], 1))
         let row = buffer.y + buffer.yBase
-        
+
         let scrollBottomRowsOffset = rows - 1 - buffer.scrollBottom
         let scrollBottomAbsolute = rows - 1 + buffer.yBase - scrollBottomRowsOffset + 1
         
@@ -4723,7 +4724,8 @@ open class Terminal {
     //
     func cmdRepeatPrecedingCharacter (_ pars: [Int], collect: cstring)
     {
-        let p = max (pars.count == 0 ? 1 : pars [0], 1)
+        // more repeats than cells on the screen only scroll the same character past
+        let p = min (cols * rows, max (pars.count == 0 ? 1 : pars [0], 1))
         let line = buffer.lines [buffer.yBase + buffer.y]
         let chData = buffer.x - 1 < 0 ? CharData (attribute: CharData.defaultAttr) : line [buffer.x - 1]
         
@@ -4769,7 +4771,7 @@ open class Terminal {
         if buffer.x > cols {
             return
         }
-        let p = max (pars.count == 0 ? 1 : pars [0], 1)
+        let p = min (cols, max (pars.count == 0 ? 1 : pars [0], 1))
 
         for _ in 0..<p {
             buffer.x = buffer.previousTabStop ()
@@ -4831,7 +4833,7 @@ open class Terminal {
     //
     func cmdScrollUp (_ pars: [Int], collect: cstring)
     {
-        let p = max (pars.count == 0 ? 1 : pars [0], 1)
+        let p = min (max (pars.count == 0 ? 1 : pars [0], 1), rows)
         let da = CharData.defaultAttr
 
         if marginMode {
