@@ -763,6 +763,10 @@ class Buffer {
 
             let lastLineLength = wrappedLines [wrappedLines.count - 1].getTrimmedLength ()
             let destLineLengths = getNewLineLengths (wrappedLines: wrappedLines, oldCols: oldCols, newCols: newCols)
+            if destLineLengths.isEmpty {
+                // a wrapped line with nothing on it has nothing to move
+                continue
+            }
             let linesToAdd = destLineLengths.count - wrappedLines.count
 
             var trimmedLines: Int
