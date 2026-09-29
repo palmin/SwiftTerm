@@ -136,6 +136,11 @@ class SixelDcsHandler : DcsHandler {
     private var x = 0
     private var y = 0
     
+    // components outside 0...1 would trap when the bitmap is built
+    private func channel(_ value: CGFloat) -> Int {
+        return Int(65535.0 * min(max(value, 0), 1))
+    }
+
     private func updatePaletteEntry(_ color: [Int]) {
         if color.count >= 5 && color[1] == 1 {
             let index = color[0]
@@ -154,10 +159,8 @@ class SixelDcsHandler : DcsHandler {
             var green = CGFloat(0)
             var blue = CGFloat(0)
             color.getRed(&red, green: &green, blue: &blue, alpha: nil)
-            
-            palette[index] = (Int(65535.0 * red),
-                              Int(65535.0 * green),
-                              Int(65535.0 * blue), 65535)
+
+            palette[index] = (channel(red), channel(green), channel(blue), 65535)
         }
         
         if color.count >= 5 && color[1] == 2 {
@@ -165,10 +168,8 @@ class SixelDcsHandler : DcsHandler {
             let red = 0.01 * CGFloat(color[2]) // percentage from 0 to 100
             let green = 0.01 * CGFloat(color[3]) // percentage from 0 to 100
             let blue = 0.01 * CGFloat(color[4]) // percentage from 0 to 100
-            
-            palette[index] = (Int(65535.0 * red),
-                              Int(65535.0 * green),
-                              Int(65535.0 * blue), 65535)
+
+            palette[index] = (channel(red), channel(green), channel(blue), 65535)
         }
     }
     
