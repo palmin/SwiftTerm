@@ -5931,7 +5931,8 @@ open class Terminal {
             updateRange (buffer.scrollTop)
             updateRange (buffer.scrollBottom)
             informLineChangeInterval(buffer.scrollTop, buffer.scrollBottom)
-        } else {
+        } else if buffer.y > 0 {
+            // above the scroll region the cursor stops at the top row, as in xterm
             buffer.y -= 1
         }
     }
