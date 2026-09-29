@@ -5375,7 +5375,7 @@ open class Terminal {
         // saved cursor for alternate screen
         // tmux returns 4294967295 (UINT_MAX) when no saved cursor exists
         if let sx = int("alternate_saved_x"), let sy = int("alternate_saved_y"),
-           sx < cols, sy < rows {
+           sx >= 0, sx < cols, sy >= 0, sy < rows {
             // when alternate is active, these are the normal-screen saved cursor
             // when normal is active, these are the alternate-screen saved cursor
             let otherBuffer = altOn ? buffers!.normal : buffers!.alt
@@ -5391,7 +5391,7 @@ open class Terminal {
                 for i in 0..<buffer.tabStops.count {
                     buffer.tabStops[i] = false
                 }
-                for col in tabCols where col < buffer.tabStops.count {
+                for col in tabCols where col >= 0 && col < buffer.tabStops.count {
                     buffer.tabStops[col] = true
                 }
             }
