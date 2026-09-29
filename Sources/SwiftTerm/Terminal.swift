@@ -268,6 +268,8 @@ public protocol TerminalDelegate {
 open class Terminal {
     let MINIMUM_COLS = 2
     let MINIMUM_ROWS = 1
+    // combining marks past this many scalars in one cell are dropped
+    let MAXIMUM_CELL_SCALARS = 32
     
     /// The current terminal columns (counting from 1)
     public private(set) var cols : Int = 80
@@ -1848,9 +1850,16 @@ open class Terminal {
                             let existingLine = buffer.lines [last.y]
                             let lastx = last.x >= cols ? cols-1 : last.x
                             var cd = existingLine [lastx]
-                            
+                            let existing = cd.getCharacter (graphemes)
+
+                            // every combination rebuilds and interns the whole cluster, so an
+                            // endless run of marks on one cell is quadratic in time and memory
+                            if existing.unicodeScalars.count >= MAXIMUM_CELL_SCALARS {
+                                continue
+                            }
+
                             // Attemp the combination
-                            let newStr = String ([cd.getCharacter (graphemes), ch])
+                            let newStr = String ([existing, ch])
                             
                             // If the resulting string is 1 grapheme cluster, then it combined properly
                             if newStr.count == 1 {
