@@ -37,9 +37,10 @@ class SixelDcsHandler : DcsHandler {
                 return result
             }
             
+            // saturate so an overlong number cannot overflow
             let digit = Int(c) - 48
             if let existing = result {
-                result = 10 * existing + digit
+                result = min(10 * existing + digit, Int(Int32.max))
             } else {
                 result = digit
             }
@@ -117,46 +118,69 @@ class SixelDcsHandler : DcsHandler {
             }
         }
 
-        // convert bitmap into image for terminal
-        if let cgImage = buildImage() {
+        // convert bitmap into image for terminal and release the pixel data, in a pool
+        // of its own so a chunk of output full of images does not keep them all alive
+        autoreleasepool {
+            let built = buildImage()
+            pixels = [[RGBA]]()
+            data = []
+            if let cgImage = built {
 #if os(iOS)
-            let image = UIImage(cgImage: cgImage)
+                let image = UIImage(cgImage: cgImage)
 #else
-            let image = NSImage(cgImage: cgImage)
+                let image = NSImage(cgImage: cgImage)
 #endif
-            let cell = ImageCell(image)            
-            terminal.image(cell)
+                let cell = ImageCell(image)
+                terminal.image(cell)
+            }
         }
     }
     
-    private typealias RGBA = (Int, Int, Int, Int)
+    // images are clipped to this many pixels in each direction, so a repeat
+    // count or a long run of line feeds from a few bytes of input cannot make
+    // us allocate gigabytes
+    static let maxImageSize = 2048
+
+    // 16 bits per component keeps a full size image at 32MB
+    private typealias RGBA = (UInt16, UInt16, UInt16, UInt16)
     private var palette = [Int: RGBA]()
     private var pixels = [[RGBA]]()
     private var x = 0
     private var y = 0
     
+    // components outside 0...1 would trap when the bitmap is built
+    private func channel(_ value: CGFloat) -> UInt16 {
+        return UInt16(65535.0 * min(max(value, 0), 1))
+    }
+
+    // sixel HLS as the VT340 and xterm read it: hue in degrees with blue at 0, red at 120
+    // and green at 240, lightness and saturation in percent; lightness is not HSB brightness
+    static func rgb(hue: Int, lightness: Int, saturation: Int) -> (CGFloat, CGFloat, CGFloat) {
+        let h = CGFloat(((hue % 360) + 360 + 240) % 360) / 60
+        let l = CGFloat(min(max(lightness, 0), 100)) / 100
+        let s = CGFloat(min(max(saturation, 0), 100)) / 100
+
+        let chroma = (1 - abs(2 * l - 1)) * s
+        let x = chroma * (1 - abs(h.truncatingRemainder(dividingBy: 2) - 1))
+        let (r, g, b): (CGFloat, CGFloat, CGFloat)
+        switch Int(h) {
+        case 0: (r, g, b) = (chroma, x, 0)
+        case 1: (r, g, b) = (x, chroma, 0)
+        case 2: (r, g, b) = (0, chroma, x)
+        case 3: (r, g, b) = (0, x, chroma)
+        case 4: (r, g, b) = (x, 0, chroma)
+        default: (r, g, b) = (chroma, 0, x)
+        }
+        let m = l - chroma / 2
+        return (r + m, g + m, b + m)
+    }
+
     private func updatePaletteEntry(_ color: [Int]) {
         if color.count >= 5 && color[1] == 1 {
             let index = color[0]
-            let hue = CGFloat(color[2]) // angle in the range 0 to 360 degrees
-            let lightness = 0.01 * CGFloat(color[3]) // percentage from 0 to 100
-            let saturation = 0.01 * CGFloat(color[4]) // percentage from 0 to 100
-            
-            // it isn't entirely clear if lightness == brightness and this page might help:
-            //   https://en.wikipedia.org/wiki/HSL_and_HSV
-            //
-            // using CoreGraphics to convert between HSL and RGB is perhaps a little
-            // wasteful but HSL colors in Sixels seems rarely used
-            let color = TTColor.make(hue: hue, saturation: saturation,
-                                     brightness: lightness, alpha: 1)
-            var red = CGFloat(0)
-            var green = CGFloat(0)
-            var blue = CGFloat(0)
-            color.getRed(&red, green: &green, blue: &blue, alpha: nil)
-            
-            palette[index] = (Int(65535.0 * red),
-                              Int(65535.0 * green),
-                              Int(65535.0 * blue), 65535)
+            let (red, green, blue) = SixelDcsHandler.rgb(hue: color[2], lightness: color[3],
+                                                         saturation: color[4])
+            palette[index] = (channel(red), channel(green), channel(blue), 65535)
         }
         
         if color.count >= 5 && color[1] == 2 {
@@ -164,10 +188,8 @@ class SixelDcsHandler : DcsHandler {
             let red = 0.01 * CGFloat(color[2]) // percentage from 0 to 100
             let green = 0.01 * CGFloat(color[3]) // percentage from 0 to 100
             let blue = 0.01 * CGFloat(color[4]) // percentage from 0 to 100
-            
-            palette[index] = (Int(65535.0 * red),
-                              Int(65535.0 * green),
-                              Int(65535.0 * blue), 65535)
+
+            palette[index] = (channel(red), channel(green), channel(blue), 65535)
         }
     }
     
@@ -175,13 +197,13 @@ class SixelDcsHandler : DcsHandler {
     // or -1 to mean transparent
     private func readPixels(_ p: inout Int, _ color: Int) {
         // determine color to write
-        let transparent = (0,0,0,0)
+        let transparent: RGBA = (0,0,0,0)
         let rgba: RGBA
         if let known = palette[color] {
             rgba = known
         } else if color < terminal.defaultAnsiColors.count {
             let standard = terminal.defaultAnsiColors[color]
-            rgba = (Int(standard.red), Int(standard.green), Int(standard.blue), 65535)
+            rgba = (standard.red, standard.green, standard.blue, 65535)
         } else {
             rgba = transparent
         }
@@ -189,7 +211,7 @@ class SixelDcsHandler : DcsHandler {
         func write(sixel: Int) {
             for k in 0..<6 {
                 let on = (sixel & (1 << k)) != 0
-                if on {
+                if on && y + k < SixelDcsHandler.maxImageSize {
                     // make sure we have lines enough
                     while y + k >= pixels.count {
                         pixels.append([RGBA]())
@@ -231,7 +253,9 @@ class SixelDcsHandler : DcsHandler {
                 x = 0
                 
             case 63...126:
-                for _ in 0..<reps {
+                // pixels past the right edge are dropped
+                let count = min(reps, max(SixelDcsHandler.maxImageSize - x, 0))
+                for _ in 0..<count {
                     write(sixel: Int(c) - 63)
                 }
                 
@@ -273,10 +297,10 @@ class SixelDcsHandler : DcsHandler {
                 let color = x < line.count ? line[x] : (0,0,0,0)
 
                 let offset = 4 * (width * y + x)
-                truecolor[offset + 0] = UInt8(255*color.0/65535)
-                truecolor[offset + 1] = UInt8(255*color.1/65535)
-                truecolor[offset + 2] = UInt8(255*color.2/65535)
-                truecolor[offset + 3] = UInt8(255*color.3/65535)
+                truecolor[offset + 0] = UInt8(255*UInt32(color.0)/65535)
+                truecolor[offset + 1] = UInt8(255*UInt32(color.1)/65535)
+                truecolor[offset + 2] = UInt8(255*UInt32(color.2)/65535)
+                truecolor[offset + 3] = UInt8(255*UInt32(color.3)/65535)
             }
         }
         
