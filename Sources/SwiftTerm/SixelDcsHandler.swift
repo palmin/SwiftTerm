@@ -153,25 +153,33 @@ class SixelDcsHandler : DcsHandler {
         return UInt16(65535.0 * min(max(value, 0), 1))
     }
 
+    // sixel HLS as the VT340 and xterm read it: hue in degrees with blue at 0, red at 120
+    // and green at 240, lightness and saturation in percent; lightness is not HSB brightness
+    static func rgb(hue: Int, lightness: Int, saturation: Int) -> (CGFloat, CGFloat, CGFloat) {
+        let h = CGFloat(((hue % 360) + 360 + 240) % 360) / 60
+        let l = CGFloat(min(max(lightness, 0), 100)) / 100
+        let s = CGFloat(min(max(saturation, 0), 100)) / 100
+
+        let chroma = (1 - abs(2 * l - 1)) * s
+        let x = chroma * (1 - abs(h.truncatingRemainder(dividingBy: 2) - 1))
+        let (r, g, b): (CGFloat, CGFloat, CGFloat)
+        switch Int(h) {
+        case 0: (r, g, b) = (chroma, x, 0)
+        case 1: (r, g, b) = (x, chroma, 0)
+        case 2: (r, g, b) = (0, chroma, x)
+        case 3: (r, g, b) = (0, x, chroma)
+        case 4: (r, g, b) = (x, 0, chroma)
+        default: (r, g, b) = (chroma, 0, x)
+        }
+        let m = l - chroma / 2
+        return (r + m, g + m, b + m)
+    }
+
     private func updatePaletteEntry(_ color: [Int]) {
         if color.count >= 5 && color[1] == 1 {
             let index = color[0]
-            let hue = CGFloat(color[2]) // angle in the range 0 to 360 degrees
-            let lightness = 0.01 * CGFloat(color[3]) // percentage from 0 to 100
-            let saturation = 0.01 * CGFloat(color[4]) // percentage from 0 to 100
-            
-            // it isn't entirely clear if lightness == brightness and this page might help:
-            //   https://en.wikipedia.org/wiki/HSL_and_HSV
-            //
-            // using CoreGraphics to convert between HSL and RGB is perhaps a little
-            // wasteful but HSL colors in Sixels seems rarely used
-            let color = TTColor.make(hue: hue, saturation: saturation,
-                                     brightness: lightness, alpha: 1)
-            var red = CGFloat(0)
-            var green = CGFloat(0)
-            var blue = CGFloat(0)
-            color.getRed(&red, green: &green, blue: &blue, alpha: nil)
-
+            let (red, green, blue) = SixelDcsHandler.rgb(hue: color[2], lightness: color[3],
+                                                         saturation: color[4])
             palette[index] = (channel(red), channel(green), channel(blue), 65535)
         }
         
