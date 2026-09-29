@@ -1460,8 +1460,9 @@ open class Terminal {
                 if let str = String(data: Data(trimmed), encoding: .utf8) {
                     let parts = str.split(separator: ":")
                     if parts.count == 2, let cx = Int(parts[0]), let cy = Int(parts[1]) {
-                        self.buffer.x = min(cx, self.cols - 1)
-                        self.buffer.y = min(cy, self.rows - 1)
+                        // the reply is remote input; the Buffer.x setter aborts on a negative column
+                        self.buffer.x = max(0, min(cx, self.cols - 1))
+                        self.buffer.y = max(0, min(cy, self.rows - 1))
                         self.tmuxCaptureRemaining = 0
                         self.tmuxCaptureNeedsClear = false
                         // reset curAttr so capture-pane SGR state doesn't leak
@@ -5421,8 +5422,8 @@ open class Terminal {
         // restore cursor from state data; if captures follow,
         // tmuxCaptureRemaining will guide phase-based rendering
         if let cx = int("cursor_x"), let cy = int("cursor_y") {
-            buffer.x = min(cx, cols - 1)
-            buffer.y = min(cy, rows - 1)
+            buffer.x = max(0, min(cx, cols - 1))
+            buffer.y = max(0, min(cy, rows - 1))
         }
 
 #if DEBUG
