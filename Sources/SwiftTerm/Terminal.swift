@@ -634,8 +634,12 @@ open class Terminal {
         cols = max (options.cols, MINIMUM_COLS)
         rows = max (options.rows, MINIMUM_ROWS)
         if buffers != nil && isReset {
+            let replacedNormal = buffers.normal
             buffers.resetNormal ()
             buffers.activateNormalBuffer(clearAlt: false)
+            // the replaced buffer and its lines retain each other and the
+            // terminal, so without this every reset leaked both
+            replacedNormal.close()
         } else if buffers == nil {
             buffers = BufferSet(self)
         }
