@@ -2899,7 +2899,8 @@ open class Terminal {
             return
         }
         buffer.x = buffer.savedX
-        buffer.y = buffer.savedY
+        // a resize since the save can leave the saved row off the screen
+        buffer.y = min (max (buffer.savedY, 0), rows - 1)
         curAttr = buffer.savedAttr
         charset = buffer.savedCharset
         originMode = savedOriginMode
