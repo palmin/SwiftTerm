@@ -118,18 +118,21 @@ class SixelDcsHandler : DcsHandler {
             }
         }
 
-        // convert bitmap into image for terminal and release the pixel data
-        let built = buildImage()
-        pixels = [[RGBA]]()
-        data = []
-        if let cgImage = built {
+        // convert bitmap into image for terminal and release the pixel data, in a pool
+        // of its own so a chunk of output full of images does not keep them all alive
+        autoreleasepool {
+            let built = buildImage()
+            pixels = [[RGBA]]()
+            data = []
+            if let cgImage = built {
 #if os(iOS)
-            let image = UIImage(cgImage: cgImage)
+                let image = UIImage(cgImage: cgImage)
 #else
-            let image = NSImage(cgImage: cgImage)
+                let image = NSImage(cgImage: cgImage)
 #endif
-            let cell = ImageCell(image)            
-            terminal.image(cell)
+                let cell = ImageCell(image)
+                terminal.image(cell)
+            }
         }
     }
     
