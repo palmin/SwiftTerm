@@ -568,6 +568,8 @@ open class Terminal {
         tdel = nil
         buffers.close()
         parser.close()
+        // it can hold a buffer that buffers no longer has, which still refers to this terminal
+        lastBufferStorage = nil
     }
     
     /// Installs the new colors as the default colors and recomputes the
@@ -638,6 +640,8 @@ open class Terminal {
         if buffers != nil && isReset {
             buffers.resetNormal ()
             buffers.activateNormalBuffer(clearAlt: false)
+            // the last print position refers to the replaced buffer, which holds this terminal
+            lastBufferStorage = nil
         } else if buffers == nil {
             buffers = BufferSet(self)
         }
