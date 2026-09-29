@@ -37,9 +37,10 @@ class SixelDcsHandler : DcsHandler {
                 return result
             }
             
+            // saturate so an overlong number cannot overflow
             let digit = Int(c) - 48
             if let existing = result {
-                result = 10 * existing + digit
+                result = min(10 * existing + digit, Int(Int32.max))
             } else {
                 result = digit
             }
