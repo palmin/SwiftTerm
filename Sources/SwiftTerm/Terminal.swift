@@ -5111,6 +5111,10 @@ open class Terminal {
     }
     
     private func informLineChangeInterval(_ y1: Int, _ y2: Int) {
+        // the cursor row can lie below the scroll region, which is an empty interval
+        if y1 > y2 {
+            return
+        }
         for y in y1...y2 {
             tdel.lineChange(source: self, y: y)
         }
