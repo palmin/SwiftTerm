@@ -2913,7 +2913,7 @@ open class Terminal {
             cmdKittyKeyboard (pars, collect)
             return
         }
-        buffer.x = buffer.savedX
+        buffer.x = min (buffer.savedX, cols - 1)
         // a resize since the save can leave the saved row off the screen
         buffer.y = min (max (buffer.savedY, 0), rows - 1)
         curAttr = buffer.savedAttr
