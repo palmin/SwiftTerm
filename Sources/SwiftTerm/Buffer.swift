@@ -224,6 +224,9 @@ class Buffer {
     
     public func clear ()
     {
+        // the lines are rebuilt below, so a yBase left over from a taller
+        // buffer would point the viewport past their end
+        yBase = 0
         yDisp = 0
         xBase = 0
         linesTop = 0
