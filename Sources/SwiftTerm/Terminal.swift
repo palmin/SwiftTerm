@@ -1516,11 +1516,16 @@ open class Terminal {
                             if scrollbackRows > 0 {
                                 let blank = self.buffer.getBlankLine(
                                     attribute: CharData.defaultAttr)
+                                // a full scrollback drops its oldest line on each
+                                // push instead of growing, so the viewport only
+                                // moves down by the lines actually added
+                                let linesBefore = self.buffer.lines.count
                                 for _ in 0..<scrollbackRows {
                                     self.buffer.lines.push(BufferLine(from: blank))
                                 }
-                                self.buffer.yBase += scrollbackRows
-                                self.buffer.yDisp += scrollbackRows
+                                let added = self.buffer.lines.count - linesBefore
+                                self.buffer.yBase += added
+                                self.buffer.yDisp += added
                                 self.buffer.x = 0
                                 self.buffer.y = 0
                             }
