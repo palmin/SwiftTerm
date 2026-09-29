@@ -1643,11 +1643,44 @@ open class Terminal {
     }
 
     public var anyImages = false
+
+    // images are cheap to send and expensive to keep, as a few kilobytes of sixel
+    // decode to a 16MB bitmap, and the buffer keeps them alive for as long as they
+    // are in the scrollback; past this many bytes the oldest images are released
+    static let maxImageBytes = 256 * 1024 * 1024
+    var imageAtoms: [(code: UInt16, bytes: Int)] = []
+    var imageBytes = 0
+
+    func retainImage (_ image: ImageCell, _ token: TinyAtom) {
+        let size = image.image.size
+#if os(iOS)
+        let scale = image.image.scale
+#else
+        let scale = CGFloat(1)
+#endif
+        let bytes = Int(4 * size.width * size.height * scale * scale)
+        imageAtoms.append((token.code, bytes))
+        imageBytes += bytes
+        guard imageBytes > Terminal.maxImageBytes else {
+            return
+        }
+
+        // forget images the payload collector already released
+        imageAtoms.removeAll { atoms.resolve (TinyAtom (code: $0.code)) == nil }
+        imageBytes = imageAtoms.reduce(0) { $0 + $1.bytes }
+        while imageBytes > Terminal.maxImageBytes && imageAtoms.count > 1 {
+            let oldest = imageAtoms.removeFirst()
+            imageBytes -= oldest.bytes
+            atoms.release (code: oldest.code)
+        }
+    }
+
     func image (_ image: ImageCell) {
         guard let token = atoms.lookup (value: image) else {
             return
         }
-        
+        retainImage (image, token)
+
         // insert image into buffer, the width comes from the remote and can be anything,
         // while a cell wider than the line breaks reflow
         let width = image.width ?? 1
