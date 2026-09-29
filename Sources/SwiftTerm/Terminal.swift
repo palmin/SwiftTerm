@@ -987,6 +987,17 @@ open class Terminal {
     }
 
     /// handles all tmux notifications; name is without % prefix, params are raw bytes
+    // set while bytes a pane produced are parsed; a DCS 1000p there was printed by a
+    // program in the pane, like a nested tmux -CC, and not tmux starting control mode
+    var parsingTmuxPaneContent = false
+
+    func parseTmuxPaneContent(_ data: ArraySlice<UInt8>) {
+        let outer = parsingTmuxPaneContent
+        parsingTmuxPaneContent = true
+        defer { parsingTmuxPaneContent = outer }
+        let _ = parser.parse2(data: data)
+    }
+
     func tmuxNotification(_ name: String, _ params: ArraySlice<UInt8>) {
         switch name {
         case "output":
@@ -1019,7 +1030,7 @@ open class Terminal {
             var decoded = tmuxDecodeOctal(params[(spaceIdx + 1)...])
             decoded.replace("\u{1b}Ptmux;\u{1b}\u{1b}", "\u{1b}")
             if !decoded.isEmpty {
-                let _ = parser.parse2(data: decoded[...])
+                parseTmuxPaneContent(decoded[...])
             }
             tmuxDelegate?.tmuxPaneOutput(source: self)
 
@@ -1060,7 +1071,7 @@ open class Terminal {
             var extDecoded = tmuxDecodeOctal(params[dataStart...])
             extDecoded.replace("\u{1b}Ptmux;\u{1b}\u{1b}", "\u{1b}")
             if !extDecoded.isEmpty {
-                let _ = parser.parse2(data: extDecoded[...])
+                parseTmuxPaneContent(extDecoded[...])
             }
             tmuxDelegate?.tmuxPaneOutput(source: self)
 
@@ -1416,7 +1427,7 @@ open class Terminal {
         parser.dscHandlerFallback = { [weak self, weak parser] code, parameters in
             if let parser = parser {
                 let character = Character(UnicodeScalar(code))
-                if character == "p" && parameters == [1000] {
+                if character == "p" && parameters == [1000] && self?.parsingTmuxPaneContent != true {
                     parser.tmuxCommandMode = true
                     if let self = self {
                         // ids left over from a previous control mode session
@@ -1512,7 +1523,7 @@ open class Terminal {
                         self.buffer.fillViewportRows()
                         self.tmuxCaptureNeedsClear = false
                         if !trimmed.isEmpty {
-                            let _ = self.parser.parse2(data: trimmed)
+                            self.parseTmuxPaneContent(trimmed)
                             // push rendered scrollback into history so it doesn't
                             // occupy the visible area when phase 1 renders
                             let scrollbackRows = self.buffer.x > 0
@@ -1544,7 +1555,7 @@ open class Terminal {
                             self.buffer.fillViewportRows()
                             self.tmuxCaptureNeedsClear = false
                         }
-                        let _ = self.parser.parse2(data: trimmed)
+                        self.parseTmuxPaneContent(trimmed)
                     }
                     // when not in alt mode, -apeNq returns empty — skip
 
@@ -1556,7 +1567,7 @@ open class Terminal {
                         self.buffer.x = 0
                         self.buffer.y = 0
                         if !trimmed.isEmpty {
-                            let _ = self.parser.parse2(data: trimmed)
+                            self.parseTmuxPaneContent(trimmed)
                         }
 #if DEBUG
                         var altNonBlank = 0
@@ -1589,7 +1600,7 @@ open class Terminal {
                         self.buffer.x = 0
                         self.buffer.y = 0
                         if !trimmed.isEmpty {
-                            let _ = self.parser.parse2(data: trimmed)
+                            self.parseTmuxPaneContent(trimmed)
                         }
 #if DEBUG
                         // log visible area after render
