@@ -1648,9 +1648,10 @@ open class Terminal {
             return
         }
         
-        // insert image into buffer
+        // insert image into buffer, the width comes from the remote and can be anything,
+        // while a cell wider than the line breaks reflow
         let width = image.width ?? 1
-        let size = Int8(width < 127 ? width : 127)
+        let size = Int8(min(max(width, 1), cols, 127))
         var charData = CharData(attribute: Attribute.empty, char: " ", size: size)
         charData.setPayload(atom: token)
         insertCharacter(charData)
