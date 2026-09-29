@@ -6223,24 +6223,59 @@ extension Array where Element == UInt8 {
               to.allSatisfy({ $0.asciiValue != nil }) else {
             return
         }
-        let array1 = from.map({ $0.asciiValue! })
-        let array2 = to.map({ $0.asciiValue! })
-        
-        // we just do naive search and replace on byte level
-        var k = 0
-        while k + array1.count <= count {
-            var match = true
-            for i in 0..<array1.count {
-                if array1[i] != self[k+i] {
-                    match = false
-                    break
-                }
-            }
-            if match {
-                replaceSubrange(k..<(k+array1.count), with: array2)
+        let pattern = from.map({ $0.asciiValue! })
+        let replacement = to.map({ $0.asciiValue! })
+        // the replacement is written back over the end of a match below
+        guard !pattern.isEmpty, replacement.count <= pattern.count, pattern != replacement else {
+            return
+        }
+
+        // nothing to replace is the common case, which leaves the array untouched
+        guard var k = Self.firstMatch(pattern, in: self, from: 0) else {
+            return
+        }
+
+        // one pass copying each byte once, where replacing inside the array moved
+        // the rest of it for every match
+        var input = self
+        var output = [UInt8]()
+        output.reserveCapacity(count)
+        output.append(contentsOf: input[0..<k])
+        while k + pattern.count <= input.count {
+            if Self.matches(pattern, in: input, at: k) {
+                // the replacement is scanned again as the in place version did, so it can
+                // start another match, which is how a nested passthrough wrapper unwraps
+                let start = k + pattern.count - replacement.count
+                input.replaceSubrange(start..<(k + pattern.count), with: replacement)
+                k = start
             } else {
+                output.append(input[k])
                 k += 1
             }
         }
+        output.append(contentsOf: input[k...])
+        self = output
+    }
+
+    private static func matches(_ pattern: [UInt8], in bytes: [UInt8], at k: Int) -> Bool {
+        for i in 0..<pattern.count where pattern[i] != bytes[k + i] {
+            return false
+        }
+        return true
+    }
+
+    private static func firstMatch(_ pattern: [UInt8], in bytes: [UInt8], from start: Int) -> Int? {
+        var k = start
+        while k + pattern.count <= bytes.count {
+            guard let candidate = bytes[k...].firstIndex(of: pattern[0]),
+                  candidate + pattern.count <= bytes.count else {
+                return nil
+            }
+            if matches(pattern, in: bytes, at: candidate) {
+                return candidate
+            }
+            k = candidate + 1
+        }
+        return nil
     }
 }
