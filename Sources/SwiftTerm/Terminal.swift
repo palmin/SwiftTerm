@@ -28,6 +28,19 @@ public enum ProgressState: Int {
 }
 
 /**
+ * A desktop notification requested with OSC 99 (the kitty notification protocol),
+ * delivered once all of its chunks have arrived
+ */
+public struct DesktopNotification {
+    /// Identifier chosen by the application, nil when it gave none
+    public let identifier: String?
+    public let title: String
+    public let body: String
+    /// 0 is low, 1 normal and 2 critical, nil when the application gave none
+    public let urgency: Int?
+}
+
+/**
  * The terminal delegate is a protocol that must be implemented by a class
  * that would provide a user interface for the terminal, and it is used by the
  * `Terminal` to notify of important changes on the underlying terminal
@@ -232,7 +245,15 @@ public protocol TerminalDelegate {
      * The default implementation does nothing.
      */
     func notify(source: Terminal, _ title: String, _ body: String)
-    
+
+    /**
+     * Invoked when client application issues an OSC 99 desktop notification
+     * (kitty protocol) and all of its chunks have arrived.
+     *
+     * The default implementation calls notify(source:_:_:) with the title and body.
+     */
+    func desktopNotification(source: Terminal, _ notification: DesktopNotification)
+
     /**
      * Invoked when client application issues OSC 9;4 progress reporting sequence.
      * Progress value is 0-100 (ignored when state is indeterminate)
@@ -651,6 +672,8 @@ open class Terminal {
         wraparound = true
         savedWraparound = wraparound
         bracketedPasteMode = false
+        sendFocus = false
+        pendingDesktopNotifications = [:]
         kittyKeyboardStackMain = [0]
         kittyKeyboardStackAlt = [0]
 
@@ -1354,6 +1377,7 @@ open class Terminal {
         // 115 - Reset Tektronix foreground color.
         // 116 - Reset Tektronix background color.
         
+        parser.oscHandlers [99] = oscDesktopNotification
         parser.oscHandlers [777] = oscNotification
         parser.oscHandlers [1337] = osciTerm2
 
@@ -2228,7 +2252,110 @@ open class Terminal {
         let body = parts[2...].joined(separator: ";")
         tdel.notify(source: self, title, body)
     }
-    
+
+    // parts of OSC 99 notifications sent with d=0, keyed by their i= identifier
+    struct PendingDesktopNotification {
+        var title = ""
+        var body = ""
+        var urgency: Int?
+    }
+    var pendingDesktopNotifications: [String: PendingDesktopNotification] = [:]
+
+    // Desktop notifications, the kitty protocol:
+    //    ESC ] 99 ; key=value:key=value ; payload ST
+    // p= says whether the payload is the title (the default) or the body, e=1
+    // that it is base64, and d=0 holds it until a later part with the same i=
+    // arrives with d=1 (the default). Unknown keys and payload types are ignored.
+    // See https://sw.kovidgoyal.net/kitty/desktop-notifications/
+    func oscDesktopNotification(_ data: ArraySlice<UInt8>) {
+        guard let separator = data.firstIndex(of: UInt8(ascii: ";")) else {
+            return
+        }
+        var metadata: [Substring: Substring] = [:]
+        let metadataText = String(decoding: data[data.startIndex..<separator], as: UTF8.self)
+        for pair in metadataText.split(separator: ":") {
+            let parts = pair.split(separator: "=", maxSplits: 1)
+            if parts.count == 2 {
+                metadata[parts[0]] = parts[1]
+            }
+        }
+        let identifier = metadata["i"].map { Terminal.sanitizedNotificationIdentifier($0) }
+        let payloadType = metadata["p"] ?? "title"
+
+        if payloadType == "?" {
+            // advertise what we act on, applications like OpenCode only send
+            // notifications once they have seen title in the p= list
+            sendResponse (cc.OSC, "99;i=\(identifier ?? "0"):p=?;a=focus:o=always,unfocused:p=title,body,?:u=0,1,2", cc.ST)
+            return
+        }
+        guard payloadType == "title" || payloadType == "body" else {
+            return
+        }
+
+        var payload = Data(data[data.index(after: separator)...])
+        if metadata["e"] == "1" {
+            guard let decoded = Data(base64Encoded: payload, options: .ignoreUnknownCharacters) else {
+                return
+            }
+            payload = decoded
+        }
+        let text = Terminal.sanitizedNotificationText(String(decoding: payload, as: UTF8.self))
+
+        let key = identifier ?? ""
+        var pending = pendingDesktopNotifications.removeValue(forKey: key) ?? PendingDesktopNotification()
+        if payloadType == "title" {
+            pending.title += text
+        } else {
+            pending.body += text
+        }
+        if let urgency = metadata["u"].flatMap({ Int($0) }), (0...2).contains(urgency) {
+            pending.urgency = urgency
+        }
+
+        if metadata["d"] == "0" {
+            // bounded, so a program that never finishes a notification cannot grow this
+            if pending.title.utf8.count + pending.body.utf8.count <= 16 * 1024,
+               pendingDesktopNotifications.count < 16 {
+                pendingDesktopNotifications[key] = pending
+            }
+            return
+        }
+
+        // a notification without a title uses its body as the title, and one
+        // with neither is ignored
+        var title = pending.title
+        var body = pending.body
+        if title.isEmpty {
+            title = body
+            body = ""
+        }
+        guard !title.isEmpty else {
+            return
+        }
+        tdel.desktopNotification(source: self, DesktopNotification(identifier: identifier, title: title,
+                                                                   body: body, urgency: pending.urgency))
+    }
+
+    // identifiers are echoed back to the application, so keep only the characters
+    // the protocol allows to rule out injecting input through them
+    static func sanitizedNotificationIdentifier(_ identifier: Substring) -> String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-+.")
+        return String(identifier.filter { allowed.contains($0) }.prefix(64))
+    }
+
+    // C0 and C1 control characters are not allowed in notification text
+    static func sanitizedNotificationText(_ text: String) -> String {
+        let scalars = text.unicodeScalars.map { scalar -> Unicode.Scalar in
+            switch scalar.value {
+            case 0..<0x20, 0x7f, 0x80...0x9f:
+                return " "
+            default:
+                return scalar
+            }
+        }
+        return String(String.UnicodeScalarView(scalars))
+    }
+
     // OSC 9;4 progress reporting:
     //    ESC ] 9 ; 4 ; <state> ; <progress> \a
     // State: 0 = hide, 1 = normal, 2 = error, 3 = indeterminate, 4 = warning
@@ -3591,6 +3718,9 @@ open class Terminal {
         guard let mode = pars.first else { return }
         let value: Int
         switch mode {
+        case 1004:
+            // focus events, see sendFocusChange
+            value = sendFocus ? 1 : 2
         case 2026:
             // synchronized output, see setMode/resetMode
             value = synchronizedOutputMode ? 1 : 2
@@ -4991,6 +5121,16 @@ open class Terminal {
     }
 
     /**
+     * Reports that the terminal gained or lost focus, as CSI I or CSI O, when the
+     * application asked for focus events (DECSET 1004). Nothing is sent otherwise.
+     */
+    public func sendFocusChange (focused: Bool)
+    {
+        guard sendFocus else { return }
+        sendResponse (cc.CSI, focused ? "I" : "O")
+    }
+
+    /**
      * Sends the provided text to the connected backend
      */
     public func sendResponse (text: String)
@@ -6111,9 +6251,13 @@ public extension TerminalDelegate {
     }
     
     func notify(source: Terminal, _ title: String, _ body: String) {
-        
+
     }
-    
+
+    func desktopNotification(source: Terminal, _ notification: DesktopNotification) {
+        notify(source: source, notification.title, notification.body)
+    }
+
     func progressUpdate(source: Terminal, state: ProgressState, progress: Int) {
         
     }
