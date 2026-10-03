@@ -169,8 +169,17 @@ class Buffer {
         
         let len = hasScrollback ? (terminal.options.scrollback) + rows : rows
         _lines = CircularList<BufferLine> (maxLength: len)
-        _lines.makeEmpty = makeEmptyLine
+        setMakeEmpty ()
         setupTabStops ()
+    }
+
+    // the buffer owns the list, so the list must not retain the buffer or a
+    // buffer dropped by a full reset is never freed
+    func setMakeEmpty ()
+    {
+        _lines.makeEmpty = { [weak self] line in
+            self?.makeEmptyLine (line) ?? BufferLine (cols: 1)
+        }
     }
     
     // remove references back to Terminal to break retain loops,
@@ -224,6 +233,9 @@ class Buffer {
     
     public func clear ()
     {
+        // the lines are rebuilt below, so a yBase left over from a taller
+        // buffer would point the viewport past their end
+        yBase = 0
         yDisp = 0
         xBase = 0
         linesTop = 0
@@ -231,7 +243,7 @@ class Buffer {
         y = 0
         
         _lines = CircularList<BufferLine> (maxLength: getCorrectBufferLength(terminal.rows))
-        _lines.makeEmpty = makeEmptyLine
+        setMakeEmpty ()
         scrollTop = 0
         scrollBottom = terminal.rows - 1
         
@@ -534,7 +546,7 @@ class Buffer {
 
             // Copy buffer data to new locations
             var destLineIndex = 0
-            var destCol = getWrappedLineTrimmedLength (lines, destLineIndex, oldCols)
+            var destCol = getWrappedLineTrimmedLength (wrappedLines, destLineIndex, oldCols)
             var srcLineIndex = 1
             var srcCol = 0
             while srcLineIndex < wrappedLines.count {
@@ -561,7 +573,7 @@ class Buffer {
                 }
 
                 // Make sure the last cell isn't wide, if it is copy it to the current dest
-                if destCol == 0 && destLineIndex != 0 {
+                if destCol == 0 && destLineIndex != 0 && destLineIndex < wrappedLines.count {
                     if wrappedLines [destLineIndex - 1].getWidth(index: newCols - 1) == 2 {
                         wrappedLines [destLineIndex].copyFrom (wrappedLines [destLineIndex - 1], srcCol: newCols - 1, dstCol: destCol, len: 1)
                         destCol += 1
@@ -571,8 +583,11 @@ class Buffer {
                 }
             }
 
-            // Clear out remaining cells or fragments could remain;
-            wrappedLines [destLineIndex].replaceCells (start: destCol, end: newCols, fillData: nullChar)
+            // Clear out remaining cells or fragments could remain; a wide character
+            // pushed to the next line can fill the last one exactly
+            if destLineIndex < wrappedLines.count {
+                wrappedLines [destLineIndex].replaceCells (start: destCol, end: newCols, fillData: nullChar)
+            }
 
             // Work backwards and remove any rows at the end that only contain null cells
             var countToRemove = 0
@@ -763,6 +778,10 @@ class Buffer {
 
             let lastLineLength = wrappedLines [wrappedLines.count - 1].getTrimmedLength ()
             let destLineLengths = getNewLineLengths (wrappedLines: wrappedLines, oldCols: oldCols, newCols: newCols)
+            if destLineLengths.isEmpty {
+                // a wrapped line with nothing on it has nothing to move
+                continue
+            }
             let linesToAdd = destLineLengths.count - wrappedLines.count
 
             var trimmedLines: Int

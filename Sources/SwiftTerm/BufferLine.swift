@@ -180,7 +180,8 @@ public class BufferLine: CustomDebugStringConvertible {
     {
         for i in (0..<data.count).reversed() {
             if data [i].code != 0 {
-                return i + Int (data [i].width)
+                // an image cell can be wider than what is left of the line
+                return min (i + Int (data [i].width), data.count)
 //                for _ in 0...i {
 //                    width += Int (data [i].width)
 //                }

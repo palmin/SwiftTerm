@@ -327,6 +327,9 @@ class EscapeSequenceParser {
     
     // buffers over several calls
     var _osc: cstring
+    // an OSC without its terminator would otherwise collect everything that follows;
+    // 64 MB of base64 is a 48 MB inline image, far more than one sequence carries
+    static let maxOscLength = 64 << 20
     var _pars: [Int]
     var _collect: cstring
     var printHandler: PrintHandler = { (slice : ArraySlice<UInt8>) -> () in }
@@ -852,7 +855,8 @@ class EscapeSequenceParser {
                     let c = data [j]
                     if c == ControlCodes.BEL || c == ControlCodes.CAN || c == ControlCodes.ESC {
                         break
-                    } else if c >= 0x20 {
+                    } else if c >= 0x20 && osc.count <= EscapeSequenceParser.maxOscLength {
+                        // one byte past the limit marks the sequence as overflowed
                         osc.append (c)
                     }
                     j += 1
@@ -860,13 +864,16 @@ class EscapeSequenceParser {
                 i = j - 1
             case .oscEnd:
                 oscTerminatedWithBel = code == ControlCodes.BEL
+                // an overflowed sequence is cut short, so it is dropped like a cancelled one
+                let complete = osc.count != 0 && osc.count <= EscapeSequenceParser.maxOscLength &&
+                               code != ControlCodes.CAN && code != ControlCodes.SUB
                 if oscIsScreenTitle {
                     // whole buffer is the title, no OSC code prefix
-                    if osc.count != 0 && code != ControlCodes.CAN && code != ControlCodes.SUB {
+                    if complete {
                         screenTitleHandler (osc [0...])
                     }
                     oscIsScreenTitle = false
-                } else if osc.count != 0 && code != ControlCodes.CAN && code != ControlCodes.SUB {
+                } else if complete {
                     // NOTE: OSC subparsing is not part of the original parser
                     // we do basic identifier parsing here to offer a jump table for OSC as well
                     var oscCode : Int

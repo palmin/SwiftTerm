@@ -289,6 +289,8 @@ public protocol TerminalDelegate {
 open class Terminal {
     let MINIMUM_COLS = 2
     let MINIMUM_ROWS = 1
+    // combining marks past this many scalars in one cell are dropped
+    let MAXIMUM_CELL_SCALARS = 32
     
     /// The current terminal columns (counting from 1)
     public private(set) var cols : Int = 80
@@ -587,6 +589,8 @@ open class Terminal {
         tdel = nil
         buffers.close()
         parser.close()
+        // it can hold a buffer that buffers no longer has, which still refers to this terminal
+        lastBufferStorage = nil
     }
     
     /// Installs the new colors as the default colors and recomputes the
@@ -657,6 +661,9 @@ open class Terminal {
         if buffers != nil && isReset {
             buffers.resetNormal ()
             buffers.activateNormalBuffer(clearAlt: false)
+            // the last print position refers to the replaced buffer, which holds this terminal;
+            // the buffer is not closed, as something still drawing it would find no terminal
+            lastBufferStorage = nil
         } else if buffers == nil {
             buffers = BufferSet(self)
         }
@@ -1006,6 +1013,17 @@ open class Terminal {
     }
 
     /// handles all tmux notifications; name is without % prefix, params are raw bytes
+    // set while bytes a pane produced are parsed; a DCS 1000p there was printed by a
+    // program in the pane, like a nested tmux -CC, and not tmux starting control mode
+    var parsingTmuxPaneContent = false
+
+    func parseTmuxPaneContent(_ data: ArraySlice<UInt8>) {
+        let outer = parsingTmuxPaneContent
+        parsingTmuxPaneContent = true
+        defer { parsingTmuxPaneContent = outer }
+        let _ = parser.parse2(data: data)
+    }
+
     func tmuxNotification(_ name: String, _ params: ArraySlice<UInt8>) {
         switch name {
         case "output":
@@ -1038,7 +1056,7 @@ open class Terminal {
             var decoded = tmuxDecodeOctal(params[(spaceIdx + 1)...])
             decoded.replace("\u{1b}Ptmux;\u{1b}\u{1b}", "\u{1b}")
             if !decoded.isEmpty {
-                let _ = parser.parse2(data: decoded[...])
+                parseTmuxPaneContent(decoded[...])
             }
             tmuxDelegate?.tmuxPaneOutput(source: self)
 
@@ -1079,7 +1097,7 @@ open class Terminal {
             var extDecoded = tmuxDecodeOctal(params[dataStart...])
             extDecoded.replace("\u{1b}Ptmux;\u{1b}\u{1b}", "\u{1b}")
             if !extDecoded.isEmpty {
-                let _ = parser.parse2(data: extDecoded[...])
+                parseTmuxPaneContent(extDecoded[...])
             }
             tmuxDelegate?.tmuxPaneOutput(source: self)
 
@@ -1436,7 +1454,7 @@ open class Terminal {
         parser.dscHandlerFallback = { [weak self, weak parser] code, parameters in
             if let parser = parser {
                 let character = Character(UnicodeScalar(code))
-                if character == "p" && parameters == [1000] {
+                if character == "p" && parameters == [1000] && self?.parsingTmuxPaneContent != true {
                     parser.tmuxCommandMode = true
                     if let self = self {
                         // ids left over from a previous control mode session
@@ -1484,8 +1502,9 @@ open class Terminal {
                 if let str = String(data: Data(trimmed), encoding: .utf8) {
                     let parts = str.split(separator: ":")
                     if parts.count == 2, let cx = Int(parts[0]), let cy = Int(parts[1]) {
-                        self.buffer.x = min(cx, self.cols - 1)
-                        self.buffer.y = min(cy, self.rows - 1)
+                        // the reply is remote input; the Buffer.x setter aborts on a negative column
+                        self.buffer.x = max(0, min(cx, self.cols - 1))
+                        self.buffer.y = max(0, min(cy, self.rows - 1))
                         self.tmuxCaptureRemaining = 0
                         self.tmuxCaptureNeedsClear = false
                         // reset curAttr so capture-pane SGR state doesn't leak
@@ -1531,7 +1550,7 @@ open class Terminal {
                         self.buffer.fillViewportRows()
                         self.tmuxCaptureNeedsClear = false
                         if !trimmed.isEmpty {
-                            let _ = self.parser.parse2(data: trimmed)
+                            self.parseTmuxPaneContent(trimmed)
                             // push rendered scrollback into history so it doesn't
                             // occupy the visible area when phase 1 renders
                             let scrollbackRows = self.buffer.x > 0
@@ -1539,11 +1558,16 @@ open class Terminal {
                             if scrollbackRows > 0 {
                                 let blank = self.buffer.getBlankLine(
                                     attribute: CharData.defaultAttr)
+                                // a full scrollback drops its oldest line on each
+                                // push instead of growing, so the viewport only
+                                // moves down by the lines actually added
+                                let linesBefore = self.buffer.lines.count
                                 for _ in 0..<scrollbackRows {
                                     self.buffer.lines.push(BufferLine(from: blank))
                                 }
-                                self.buffer.yBase += scrollbackRows
-                                self.buffer.yDisp += scrollbackRows
+                                let added = self.buffer.lines.count - linesBefore
+                                self.buffer.yBase += added
+                                self.buffer.yDisp += added
                                 self.buffer.x = 0
                                 self.buffer.y = 0
                             }
@@ -1558,7 +1582,7 @@ open class Terminal {
                             self.buffer.fillViewportRows()
                             self.tmuxCaptureNeedsClear = false
                         }
-                        let _ = self.parser.parse2(data: trimmed)
+                        self.parseTmuxPaneContent(trimmed)
                     }
                     // when not in alt mode, -apeNq returns empty — skip
 
@@ -1570,7 +1594,7 @@ open class Terminal {
                         self.buffer.x = 0
                         self.buffer.y = 0
                         if !trimmed.isEmpty {
-                            let _ = self.parser.parse2(data: trimmed)
+                            self.parseTmuxPaneContent(trimmed)
                         }
 #if DEBUG
                         var altNonBlank = 0
@@ -1603,7 +1627,7 @@ open class Terminal {
                         self.buffer.x = 0
                         self.buffer.y = 0
                         if !trimmed.isEmpty {
-                            let _ = self.parser.parse2(data: trimmed)
+                            self.parseTmuxPaneContent(trimmed)
                         }
 #if DEBUG
                         // log visible area after render
@@ -1667,14 +1691,48 @@ open class Terminal {
     }
 
     public var anyImages = false
+
+    // images are cheap to send and expensive to keep, as a few kilobytes of sixel
+    // decode to a 16MB bitmap, and the buffer keeps them alive for as long as they
+    // are in the scrollback; past this many bytes the oldest images are released
+    static let maxImageBytes = 256 * 1024 * 1024
+    var imageAtoms: [(code: UInt16, bytes: Int)] = []
+    var imageBytes = 0
+
+    func retainImage (_ image: ImageCell, _ token: TinyAtom) {
+        let size = image.image.size
+#if os(iOS)
+        let scale = image.image.scale
+#else
+        let scale = CGFloat(1)
+#endif
+        let bytes = Int(4 * size.width * size.height * scale * scale)
+        imageAtoms.append((token.code, bytes))
+        imageBytes += bytes
+        guard imageBytes > Terminal.maxImageBytes else {
+            return
+        }
+
+        // forget images the payload collector already released
+        imageAtoms.removeAll { atoms.resolve (TinyAtom (code: $0.code)) == nil }
+        imageBytes = imageAtoms.reduce(0) { $0 + $1.bytes }
+        while imageBytes > Terminal.maxImageBytes && imageAtoms.count > 1 {
+            let oldest = imageAtoms.removeFirst()
+            imageBytes -= oldest.bytes
+            atoms.release (code: oldest.code)
+        }
+    }
+
     func image (_ image: ImageCell) {
         guard let token = atoms.lookup (value: image) else {
             return
         }
-        
-        // insert image into buffer
+        retainImage (image, token)
+
+        // insert image into buffer, the width comes from the remote and can be anything,
+        // while a cell wider than the line breaks reflow
         let width = image.width ?? 1
-        let size = Int8(width < 127 ? width : 127)
+        let size = Int8(min(max(width, 1), cols, 127))
         var charData = CharData(attribute: Attribute.empty, char: " ", size: size)
         charData.setPayload(atom: token)
         insertCharacter(charData)
@@ -1872,9 +1930,16 @@ open class Terminal {
                             let existingLine = buffer.lines [last.y]
                             let lastx = last.x >= cols ? cols-1 : last.x
                             var cd = existingLine [lastx]
-                            
+                            let existing = cd.getCharacter (graphemes)
+
+                            // every combination rebuilds and interns the whole cluster, so an
+                            // endless run of marks on one cell is quadratic in time and memory
+                            if existing.unicodeScalars.count >= MAXIMUM_CELL_SCALARS {
+                                continue
+                            }
+
                             // Attemp the combination
-                            let newStr = String ([cd.getCharacter (graphemes), ch])
+                            let newStr = String ([existing, ch])
                             
                             // If the resulting string is 1 grapheme cluster, then it combined properly
                             if newStr.count == 1 {
@@ -2738,7 +2803,12 @@ open class Terminal {
         let buffer = self.buffer
         let param = max (pars.count > 0 ? pars [0] : 1, 1)
 
-        buffer.x = (usingMargins() ? buffer.marginLeft : 0) + min (param - 1, cols - 1)
+        if usingMargins() {
+            // with origin mode the column counts from the left margin and stops at the right one
+            buffer.x = min (buffer.marginLeft + min (param - 1, cols - 1), buffer.marginRight)
+        } else {
+            buffer.x = min (param - 1, cols - 1)
+        }
     }
 
     //
@@ -2870,9 +2940,10 @@ open class Terminal {
         if buffer.y < buffer.scrollTop || buffer.y > buffer.scrollBottom {
             return
         }
-        var p = max (pars.count == 0 ? 1 : pars [0], 1)
+        // no point inserting more lines than the available rows, as in cmdDeleteLines
+        var p = min (buffer.rows+1, max (pars.count == 0 ? 1 : pars [0], 1))
         let row = buffer.y + buffer.yBase
-        
+
         let scrollBottomRowsOffset = rows - 1 - buffer.scrollBottom
         let scrollBottomAbsolute = rows - 1 + buffer.yBase - scrollBottomRowsOffset + 1
         
@@ -3025,8 +3096,9 @@ open class Terminal {
             cmdKittyKeyboard (pars, collect)
             return
         }
-        buffer.x = buffer.savedX
-        buffer.y = buffer.savedY
+        buffer.x = min (buffer.savedX, cols - 1)
+        // a resize since the save can leave the saved row off the screen
+        buffer.y = min (max (buffer.savedY, 0), rows - 1)
         curAttr = buffer.savedAttr
         charset = buffer.savedCharset
         originMode = savedOriginMode
@@ -4852,7 +4924,8 @@ open class Terminal {
     //
     func cmdRepeatPrecedingCharacter (_ pars: [Int], collect: cstring)
     {
-        let p = max (pars.count == 0 ? 1 : pars [0], 1)
+        // more repeats than cells on the screen only scroll the same character past
+        let p = min (cols * rows, max (pars.count == 0 ? 1 : pars [0], 1))
         let line = buffer.lines [buffer.yBase + buffer.y]
         let chData = buffer.x - 1 < 0 ? CharData (attribute: CharData.defaultAttr) : line [buffer.x - 1]
         
@@ -4898,7 +4971,7 @@ open class Terminal {
         if buffer.x > cols {
             return
         }
-        let p = max (pars.count == 0 ? 1 : pars [0], 1)
+        let p = min (cols, max (pars.count == 0 ? 1 : pars [0], 1))
 
         for _ in 0..<p {
             buffer.x = buffer.previousTabStop ()
@@ -4960,7 +5033,7 @@ open class Terminal {
     //
     func cmdScrollUp (_ pars: [Int], collect: cstring)
     {
-        let p = max (pars.count == 0 ? 1 : pars [0], 1)
+        let p = min (max (pars.count == 0 ? 1 : pars [0], 1), rows)
         let da = CharData.defaultAttr
 
         if marginMode {
@@ -5248,6 +5321,10 @@ open class Terminal {
     }
     
     private func informLineChangeInterval(_ y1: Int, _ y2: Int) {
+        // the cursor row can lie below the scroll region, which is an empty interval
+        if y1 > y2 {
+            return
+        }
         for y in y1...y2 {
             tdel.lineChange(source: self, y: y)
         }
@@ -5515,7 +5592,7 @@ open class Terminal {
         // saved cursor for alternate screen
         // tmux returns 4294967295 (UINT_MAX) when no saved cursor exists
         if let sx = int("alternate_saved_x"), let sy = int("alternate_saved_y"),
-           sx < cols, sy < rows {
+           sx >= 0, sx < cols, sy >= 0, sy < rows {
             // when alternate is active, these are the normal-screen saved cursor
             // when normal is active, these are the alternate-screen saved cursor
             let otherBuffer = altOn ? buffers!.normal : buffers!.alt
@@ -5531,7 +5608,7 @@ open class Terminal {
                 for i in 0..<buffer.tabStops.count {
                     buffer.tabStops[i] = false
                 }
-                for col in tabCols where col < buffer.tabStops.count {
+                for col in tabCols where col >= 0 && col < buffer.tabStops.count {
                     buffer.tabStops[col] = true
                 }
             }
@@ -5561,8 +5638,8 @@ open class Terminal {
         // restore cursor from state data; if captures follow,
         // tmuxCaptureRemaining will guide phase-based rendering
         if let cx = int("cursor_x"), let cy = int("cursor_y") {
-            buffer.x = min(cx, cols - 1)
-            buffer.y = min(cy, rows - 1)
+            buffer.x = max(0, min(cx, cols - 1))
+            buffer.y = max(0, min(cy, rows - 1))
         }
 
 #if DEBUG
@@ -6071,7 +6148,8 @@ open class Terminal {
             updateRange (buffer.scrollTop)
             updateRange (buffer.scrollBottom)
             informLineChangeInterval(buffer.scrollTop, buffer.scrollBottom)
-        } else {
+        } else if buffer.y > 0 {
+            // above the scroll region the cursor stops at the top row, as in xterm
             buffer.y -= 1
         }
     }
@@ -6346,24 +6424,59 @@ extension Array where Element == UInt8 {
               to.allSatisfy({ $0.asciiValue != nil }) else {
             return
         }
-        let array1 = from.map({ $0.asciiValue! })
-        let array2 = to.map({ $0.asciiValue! })
-        
-        // we just do naive search and replace on byte level
-        var k = 0
-        while k + array1.count <= count {
-            var match = true
-            for i in 0..<array1.count {
-                if array1[i] != self[k+i] {
-                    match = false
-                    break
-                }
-            }
-            if match {
-                replaceSubrange(k..<(k+array1.count), with: array2)
+        let pattern = from.map({ $0.asciiValue! })
+        let replacement = to.map({ $0.asciiValue! })
+        // the replacement is written back over the end of a match below
+        guard !pattern.isEmpty, replacement.count <= pattern.count, pattern != replacement else {
+            return
+        }
+
+        // nothing to replace is the common case, which leaves the array untouched
+        guard var k = Self.firstMatch(pattern, in: self, from: 0) else {
+            return
+        }
+
+        // one pass copying each byte once, where replacing inside the array moved
+        // the rest of it for every match
+        var input = self
+        var output = [UInt8]()
+        output.reserveCapacity(count)
+        output.append(contentsOf: input[0..<k])
+        while k + pattern.count <= input.count {
+            if Self.matches(pattern, in: input, at: k) {
+                // the replacement is scanned again as the in place version did, so it can
+                // start another match, which is how a nested passthrough wrapper unwraps
+                let start = k + pattern.count - replacement.count
+                input.replaceSubrange(start..<(k + pattern.count), with: replacement)
+                k = start
             } else {
+                output.append(input[k])
                 k += 1
             }
         }
+        output.append(contentsOf: input[k...])
+        self = output
+    }
+
+    private static func matches(_ pattern: [UInt8], in bytes: [UInt8], at k: Int) -> Bool {
+        for i in 0..<pattern.count where pattern[i] != bytes[k + i] {
+            return false
+        }
+        return true
+    }
+
+    private static func firstMatch(_ pattern: [UInt8], in bytes: [UInt8], from start: Int) -> Int? {
+        var k = start
+        while k + pattern.count <= bytes.count {
+            guard let candidate = bytes[k...].firstIndex(of: pattern[0]),
+                  candidate + pattern.count <= bytes.count else {
+                return nil
+            }
+            if matches(pattern, in: bytes, at: candidate) {
+                return candidate
+            }
+            k = candidate + 1
+        }
+        return nil
     }
 }
