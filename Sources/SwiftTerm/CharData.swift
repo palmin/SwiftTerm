@@ -100,10 +100,15 @@ public struct Attribute: Equatable, Hashable {
     public private(set) var fg, bg: Color
     // The cell attributes
     public private(set) var style: CharacterStyle
-    
+    /// The underline colour (SGR 58) as an index into the owning terminal's
+    /// `UnderlineColorTable`, 0 when none is set. Resolve it with
+    /// `Terminal.underlineColor(of:)`. One byte keeps `CharData` at 20 bytes.
+    public internal(set) var underlineColorIndex: UInt8 = 0
+
     public static func ==(lhs: Attribute, rhs: Attribute) -> Bool
     {
-        lhs.style == rhs.style && lhs.fg == rhs.fg && lhs.bg == rhs.bg
+        lhs.style == rhs.style && lhs.fg == rhs.fg && lhs.bg == rhs.bg &&
+            lhs.underlineColorIndex == rhs.underlineColorIndex
     }
     
     // Returns an attribute with just the colors
@@ -274,6 +279,48 @@ public final class GraphemeTable {
     /// Resolves an index previously returned by `intern` back to its grapheme.
     func character (for code: Int32) -> Character {
         return indexToChar [code] ?? " "
+    }
+}
+
+/// Per-terminal table interning underline colours (SGR 58), so `Attribute`
+/// stores a one-byte index instead of a `Color?`, which would grow every cell by
+/// four bytes. Index 0 means no underline colour. Indices are handed out in
+/// order and only reused after `reset`, which the terminal calls on a full
+/// reset that replaces the buffers holding them; once 255 colours are in use,
+/// further colours are dropped (index 0).
+public final class UnderlineColorTable {
+    private var colorToIndex: [Attribute.Color: UInt8] = [:]
+    // colors [i - 1] is the colour of index i
+    private var colors: [Attribute.Color] = []
+
+    public init () {}
+
+    /// Returns the index for the colour, allocating one if needed, or 0 when the table is full.
+    func intern (_ color: Attribute.Color) -> UInt8 {
+        if let existing = colorToIndex [color] {
+            return existing
+        }
+        guard colors.count < Int (UInt8.max) else {
+            return 0
+        }
+        colors.append (color)
+        let index = UInt8 (colors.count)
+        colorToIndex [color] = index
+        return index
+    }
+
+    /// Resolves an index from `intern`, nil for 0 or an index this table did not hand out.
+    func color (for index: UInt8) -> Attribute.Color? {
+        guard index > 0, Int (index) <= colors.count else {
+            return nil
+        }
+        return colors [Int (index) - 1]
+    }
+
+    /// Forgets every colour; only valid once no cell holds an index any more.
+    func reset () {
+        colorToIndex.removeAll ()
+        colors.removeAll ()
     }
 }
 

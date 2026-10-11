@@ -26,6 +26,8 @@ enum ParserState : UInt8 {
     case csiIgnore
     case sosPmApcString
     case oscString
+    // APC (ESC _), collected like an OSC so kitty graphics (APC G) reaches the terminal
+    case apcString
     case dcsEntry
     case dcsParam
     case dcsIgnore
@@ -163,7 +165,8 @@ class EscapeSequenceParser {
             table.add (code: 0x9c, state: state, action: .ignore, next: .ground) // ST as terminator
             table.add (code: 0x1b, state: state, action: .clear, next: .escape)  // ESC
             table.add (code: 0x9d, state: state, action: .oscStart, next: .oscString)  // OSC
-            table.add (codes: [0x98, 0x9e, 0x9f], state: state, action: .ignore, next: .sosPmApcString)
+            table.add (codes: [0x98, 0x9e], state: state, action: .ignore, next: .sosPmApcString)
+            table.add (code: 0x9f, state: state, action: .oscStart, next: .apcString)  // APC
             table.add (code: 0x9b, state: state, action: .clear, next: .csiEntry)  // CSI
             table.add (code: 0x90, state: state, action: .clear, next: .dcsEntry)  // DCS
         }
@@ -172,6 +175,8 @@ class EscapeSequenceParser {
         table.add (codes: executables, state: .escape, action: .execute, next: .escape)
         table.add (code: 0x7f, state: .escape, action: .ignore, next: .escape)
         table.add (codes: executables, state: .oscString, action: .ignore, next: .oscString)
+        // before the apc terminator rule below, as executables include CAN and BEL
+        table.add (codes: executables, state: .apcString, action: .ignore, next: .apcString)
         table.add (codes: executables, state: .csiEntry, action: .execute, next: .csiEntry)
         table.add (code: 0x7f, state: .csiEntry, action: .ignore, next: .csiEntry)
         table.add (codes: executables, state: .csiParam, action: .execute, next: .csiParam)
@@ -187,8 +192,18 @@ class EscapeSequenceParser {
         table.add (code: 0x7f, state: .oscString, action: .oscPut, next: .oscString)
         table.add (codes: [0x9c, 0x1b, 0x18, 0x1a, 0x07], state: .oscString, action: .oscEnd, next: .ground)
         table.add (codes: r (low: 0x1c, high: 0x20), state: .oscString, action: .ignore, next: .oscString)
-        // sos/pm/apc does nothing
-        table.add (codes: [0x58, 0x5e, 0x5f], state: .escape, action: .ignore, next: .sosPmApcString)
+        // apc (kitty graphics), collected in the osc buffer so it shares the size cap;
+        // the first payload byte names the apc type and oscEnd dispatches it
+        table.add (code: 0x5f, state: .escape, action: .oscStart, next: .apcString)
+        table.add (codes: printables, state: .apcString, action: .oscPut, next: .apcString)
+        table.add (code: 0x7f, state: .apcString, action: .oscPut, next: .apcString)
+        table.add (codes: [0x1b, 0x18, 0x1a, 0x07], state: .apcString, action: .oscEnd, next: .ground)
+        // C1 bytes stay payload, so a UTF-8 continuation byte that starts a read
+        // cannot end the apc (or C1 ST, which is also a continuation byte)
+        table.add (codes: r (low: 0x80, high: 0xa0), state: .apcString, action: .oscPut, next: .apcString)
+        table.add (codes: r (low: 0x1c, high: 0x20), state: .apcString, action: .ignore, next: .apcString)
+        // sos/pm does nothing
+        table.add (codes: [0x58, 0x5e], state: .escape, action: .ignore, next: .sosPmApcString)
         table.add (codes: printables, state: .sosPmApcString, action: .ignore, next: .sosPmApcString)
         table.add (codes: executables, state: .sosPmApcString, action: .ignore, next: .sosPmApcString)
         table.add (code: 0x9c, state: .sosPmApcString, action: .ignore, next: .ground)
@@ -259,6 +274,7 @@ class EscapeSequenceParser {
         table.add (code: 0x7f, state: .dcsPassthrough, action: .ignore, next: .dcsPassthrough)
         table.add (codes: [0x1b, 0x9c], state: .dcsPassthrough, action: .dcsUnhook, next: .ground)
         table.add (code: NonAsciiPrintable, state: .oscString, action: .oscPut, next: .oscString)
+        table.add (code: NonAsciiPrintable, state: .apcString, action: .oscPut, next: .apcString)
         return table
     }
     
@@ -291,6 +307,10 @@ class EscapeSequenceParser {
     // so replies to OSC queries can mirror the terminator the request used the
     // way xterm does; only valid inside an OscHandler
     var oscTerminatedWithBel = false
+    // APC strings, called with the first byte (the apc type, G for kitty graphics)
+    // and the rest; the content is only valid during the call
+    typealias ApcHandler = (UInt8, ArraySlice<UInt8>) -> ()
+    var apcHandler: ApcHandler = { _, _ in }
     var executeHandlers: [UInt8:ExecuteHandler] = [:]
     var escHandlers: [cstring:EscHandler] = [:]
     var dcsHandlers: [cstring:DcsHandler] = [:]
@@ -330,6 +350,9 @@ class EscapeSequenceParser {
     // an OSC without its terminator would otherwise collect everything that follows;
     // 64 MB of base64 is a 48 MB inline image, far more than one sequence carries
     static let maxOscLength = 64 << 20
+    // a kitty image arrives as many 4 KB apc chunks, so the string buffer keeps its
+    // capacity after an apc unless that apc grew it past this; an osc frees it as before
+    static let maxRetainedOscCapacity = 64 << 10
     var _pars: [Int]
     var _collect: cstring
     var printHandler: PrintHandler = { (slice : ArraySlice<UInt8>) -> () in }
@@ -359,6 +382,8 @@ class EscapeSequenceParser {
         errorHandler = { $0 }
         screenTitleHandler = { _ in }
         oscIsScreenTitle = false
+        apcHandler = { _, _ in }
+        abandonStringSequence ()
         oscHandlerFallback = { _, _ in }
         executeHandlerFallback = {}
         printHandler = { _ in }
@@ -367,6 +392,18 @@ class EscapeSequenceParser {
         csiHandlerFallback = { _, _, _ in }
     }
     
+    // drops an OSC or APC that is still collecting, so bytes from another stream or a
+    // later session are not appended to it. it works between parse calls; from inside
+    // a handler the running parse writes its own state back when it returns
+    func abandonStringSequence ()
+    {
+        if currentState == .oscString || currentState == .apcString {
+            currentState = .ground
+        }
+        oscIsScreenTitle = false
+        _osc = []
+    }
+
     func ParserEscHandlerFallback (collect: cstring, flag: UInt8)
     {
     }
@@ -633,7 +670,10 @@ class EscapeSequenceParser {
         var currentState = self.currentState
         var printVal = -1
         var dcs = -1
+        // taken out of the parser so the local stays uniquely referenced and keeps
+        // its capacity instead of being copied on the first change of each read
         var osc = self._osc
+        self._osc = []
         var collect = self._collect
         var pars = self._pars
         var dcsHandler = activeDcsHandler
@@ -649,6 +689,7 @@ class EscapeSequenceParser {
         let len = data.endIndex
         while i < len {
             if startingTmuxMode != tmuxCommandMode {
+                _osc = osc
                 return i
             }
             
@@ -751,6 +792,7 @@ class EscapeSequenceParser {
                     state.collect = collect
                     let inject = errorHandler (state)
                     if inject.abort {
+                        _osc = osc
                         return len
                     }
                     error = false;
@@ -794,7 +836,7 @@ class EscapeSequenceParser {
                     printHandler (data [printVal..<i])
                     printVal = -1
                 }
-                osc = []
+                EscapeSequenceParser.clearString (&osc)
                 pars = [0]
                 collect = []
                 dcs = -1
@@ -836,7 +878,7 @@ class EscapeSequenceParser {
                 if code == 0x1b {
                     transition |= ParserState.escape.rawValue
                 }
-                osc = []
+                EscapeSequenceParser.clearString (&osc)
                 pars = [0]
                 collect = []
                 dcs = -1
@@ -846,14 +888,19 @@ class EscapeSequenceParser {
                     printHandler (data[printVal..<i])
                     printVal = -1
                 }
-                osc = []
+                EscapeSequenceParser.clearString (&osc)
                 // ESC k entry -> collect as screen/tmux title
                 oscIsScreenTitle = (code == 0x6b)
             case .oscPut:
+                // SUB cancels an apc wherever it lands in a read, as the table does
+                // for its first byte; an osc keeps skipping it inside a run
+                let subEnds = currentState == .apcString
                 var j = i
                 while j < len {
                     let c = data [j]
                     if c == ControlCodes.BEL || c == ControlCodes.CAN || c == ControlCodes.ESC {
+                        break
+                    } else if c == ControlCodes.SUB && subEnds {
                         break
                     } else if c >= 0x20 && osc.count <= EscapeSequenceParser.maxOscLength {
                         // one byte past the limit marks the sequence as overflowed
@@ -867,7 +914,12 @@ class EscapeSequenceParser {
                 // an overflowed sequence is cut short, so it is dropped like a cancelled one
                 let complete = osc.count != 0 && osc.count <= EscapeSequenceParser.maxOscLength &&
                                code != ControlCodes.CAN && code != ControlCodes.SUB
-                if oscIsScreenTitle {
+                // currentState is still the state the string was collected in
+                if currentState == .apcString {
+                    if complete {
+                        apcHandler (osc [0], osc [1...])
+                    }
+                } else if oscIsScreenTitle {
                     // whole buffer is the title, no OSC code prefix
                     if complete {
                         screenTitleHandler (osc [0...])
@@ -896,7 +948,7 @@ class EscapeSequenceParser {
                 if code == 0x1b {
                     transition |= ParserState.escape.rawValue
                 }
-                osc = []
+                EscapeSequenceParser.clearString (&osc, keep: currentState == .apcString)
                 pars = [0]
                 collect = []
                 dcs = -1
@@ -932,6 +984,20 @@ class EscapeSequenceParser {
         return len
     }
     
+    // empties the string buffer; keep is only passed after an apc, so the next kitty
+    // chunk reuses a moderate buffer while osc traffic frees it exactly as before
+    static func clearString (_ osc: inout cstring, keep: Bool = false)
+    {
+        if osc.isEmpty {
+            return
+        }
+        if keep && osc.capacity <= maxRetainedOscCapacity {
+            osc.removeAll (keepingCapacity: true)
+        } else {
+            osc = []
+        }
+    }
+
     static func parseInt (_ str: ArraySlice<UInt8>) -> Int
     {
         var result = 0

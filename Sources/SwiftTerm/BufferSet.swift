@@ -51,9 +51,12 @@ class BufferSet {
         // when activated.
         
         if clearAlt {
+            terminal?.clearKittyImages (in: alt, isAlternateBuffer: true)
             alt.clear ()
         }
         active = normal
+        // replaces the alternate screen's kitty animation schedule with this screen's
+        terminal?.kittyGraphicsDidActivateScreen ()
     }
     
     public func resetNormal ()
@@ -65,7 +68,9 @@ class BufferSet {
 
     ///
     /// - Parameter fillAttr: if non-nil, it clears the alt buffer with the specified attribute
-    public func activateAltBuffer (fillAttr : Attribute?)
+    /// - Parameter clearKittyImages: false keeps the alternate screen's kitty images, for a
+    ///   tmux capture replay that returns to an alternate screen it only left for the capture
+    public func activateAltBuffer (fillAttr : Attribute?, clearKittyImages: Bool = true)
     {
         if active === alt {
             return
@@ -87,6 +92,11 @@ class BufferSet {
         
         alt.fillViewportRows(attribute: fillAttr)
         active = alt
+        // the alternate screen starts without kitty images, like its text
+        if clearKittyImages {
+            terminal?.clearKittyImages (in: alt, isAlternateBuffer: true)
+        }
+        terminal?.kittyGraphicsDidActivateScreen ()
     }
     
     public func resize (newColumns : Int, newRows : Int ) {

@@ -87,7 +87,43 @@ public protocol TerminalDelegate {
      */
     @discardableResult
     func windowCommand (source: Terminal, command: Terminal.WindowManipulationCommand) -> [UInt8]?
-    
+
+    /**
+     * Returns the size of one cell in the units kitty graphics clients address
+     * (protocol pixels), which sizes a placement that does not give both a column
+     * and a row count and clamps its pixel offsets.   It should agree with the cell
+     * size reported for CSI 16 t, rounded the same way.   It is called on the
+     * queue that drives the terminal, so it must not measure fonts.
+     *
+     * The default implementation returns nil, in which case such a placement
+     * covers one cell for each column and row it asked for.
+     */
+    func cellSizeInPixels (source: Terminal) -> (width: Int, height: Int)?
+
+    /**
+     * Returns the cell size in the same units as `cellSizeInPixels` before it is
+     * rounded, for the side of a placement the client left to the aspect ratio
+     * (only a column or only a row count).   A client cannot compute that side
+     * itself, and a renderer that lays it out with the exact cell then gets the
+     * box it fills.   Also called on the queue that drives the terminal.
+     *
+     * The default implementation returns nil, which uses `cellSizeInPixels`.
+     */
+    func exactCellSizeInPixels (source: Terminal) -> (width: Double, height: Double)?
+
+    /**
+     * Invoked when a kitty graphics animation needs the terminal to advance at
+     * `deadlineUptimeNanoseconds` (the `DispatchTime.uptimeNanoseconds` clock).
+     * Once the deadline passes, call `kittyAnimationTimerFired(serial:)` on the
+     * queue that drives the terminal, holding the terminal weakly.   A serial that
+     * is no longer current is ignored, so only the latest request matters.   A host
+     * that skips requests for a while, for example while the terminal is hidden,
+     * calls `kittyResumeAnimationTimer()` to start the schedule again.
+     *
+     * The default implementation does nothing, which leaves animations on their current frame.
+     */
+    func kittyAnimationTimerRequested (source: Terminal, deadlineUptimeNanoseconds: UInt64, serial: UInt64)
+
     /**
      * This method is invoked when the terminal dimensions have changed in response
      * to an escape sequence that triggers a terminal resize, the user interface toolkit
@@ -309,6 +345,15 @@ open class Terminal {
     /// replacing the former process-global statics on `TinyAtom`.
     let atoms = AtomTable ()
 
+    /// Per-terminal table of the underline colours (SGR 58) that
+    /// `Attribute.underlineColorIndex` points into.
+    let underlineColors = UnderlineColorTable ()
+
+    /// The underline colour (SGR 58) of an attribute from this terminal, nil when none is set.
+    public func underlineColor (of attribute: Attribute) -> Attribute.Color? {
+        underlineColors.color (for: attribute.underlineColorIndex)
+    }
+
     // The current buffers
     var buffers : BufferSet!
     
@@ -323,6 +368,14 @@ open class Terminal {
     // each stack has a base entry of 0 that pop never removes.
     var kittyKeyboardStackMain: [Int] = [0]
     var kittyKeyboardStackAlt: [Int] = [0]
+
+    // kitty graphics protocol images and placements for both screens, see KittyGraphics.swift
+    var kittyGraphicsState = KittyGraphicsState ()
+    // true while either screen holds a kitty placement, a cheap guard for the scroll hooks
+    var hasKittyPlacements = false
+    // identifies the current kitty animation timer request; bumped when the schedule
+    // is replaced and on close, so a stale fire is ignored
+    var kittyAnimationTimerSerial: UInt64 = 0
 
     // the kitty keyboard protocol progressive-enhancement bits we implement;
     // 1 is "disambiguate escape codes" which sends the Esc key as CSI 27 u
@@ -587,6 +640,8 @@ open class Terminal {
     // and we clear these in close
     public func close() {
         tdel = nil
+        // a kitty animation timer that fires after this finds a stale serial
+        kittyAnimationTimerSerial &+= 1
         buffers.close()
         parser.close()
         // it can hold a buffer that buffers no longer has, which still refers to this terminal
@@ -931,6 +986,8 @@ open class Terminal {
         tmuxCaptureRemaining = 0
         tmuxCaptureExpected = false
         tmuxResizePending = 0
+        // a kitty transmission from a pane cannot continue in the plain stream
+        abandonKittyGraphicsTransmission ()
     }
 
     /// Non-nil when the parser is inside a %begin/%end block
@@ -951,7 +1008,22 @@ open class Terminal {
     /// Used for targeted refresh-client -A '<pane>:continue' commands when
     /// the client is running under tmux pause-after, and to route %output
     /// so only the active pane draws into the buffer.
-    public var currentTmuxPaneId: String? = nil
+    public var currentTmuxPaneId: String? = nil {
+        didSet {
+            // the next %output comes from another pane, which must not continue the
+            // previous pane's kitty transmission or an apc the parser is collecting
+            if oldValue != currentTmuxPaneId {
+                abandonKittyGraphicsTransmission ()
+                // pane ids are unique per server, so the images and virtual placements
+                // belong to another pane; a capture replay in flight when the pane
+                // changes, which skips the reset, must not resolve the new pane's
+                // placeholders to them
+                if oldValue != nil {
+                    clearAllKittyImages ()
+                }
+            }
+        }
+    }
     /// Session id ("$1") of the session this control client is attached to,
     /// from %session-changed. A control client receives notifications about
     /// every session on the server; this is used to ignore the others.
@@ -1134,6 +1206,8 @@ open class Terminal {
             print("tmux: %exit received")
 #endif
             parser.tmuxCommandMode = false
+            // a kitty transmission from a pane cannot continue in the plain stream
+            abandonKittyGraphicsTransmission ()
             tmuxDelegate?.tmuxModeEnded(source: self)
 
         case "alert-bell":
@@ -1399,6 +1473,13 @@ open class Terminal {
         parser.oscHandlers [777] = oscNotification
         parser.oscHandlers [1337] = osciTerm2
 
+        // APC G is the kitty graphics protocol; other APC strings are ignored
+        parser.apcHandler = { command, content in
+            if command == UInt8 (ascii: "G") {
+                self.handleKittyGraphics (content)
+            }
+        }
+
         //
         // ESC handlers
         //
@@ -1588,8 +1669,11 @@ open class Terminal {
 
                 case 1: // visible content (capture-pane -peN)
                     if self.tmuxStateAlternateOn {
-                        // switch to alt buffer and render alt content
-                        self.buffers!.activateAltBuffer(fillAttr: nil)
+                        // switch to alt buffer and render alt content; the pane's alternate
+                        // screen kitty images and virtual placements stay for the replayed
+                        // placeholders, while placements anchored to the wiped lines go
+                        self.buffers!.activateAltBuffer(fillAttr: nil, clearKittyImages: false)
+                        self.clearKittyPlacementsForCaptureReplay()
                         self.tdel.bufferActivated(source: self)
                         self.buffer.x = 0
                         self.buffer.y = 0
@@ -2077,7 +2161,8 @@ open class Terminal {
         let buffer = self.buffer
         let by = buffer.y
 
-        let canScroll = buffer.x >= buffer.marginLeft && buffer.x <= buffer.marginRight
+        // margins left over after DECLRMM was reset must not stop the scroll (upstream e4b7272)
+        let canScroll = !marginMode || (buffer.x >= buffer.marginLeft && buffer.x <= buffer.marginRight)
 
         if by == buffer.scrollBottom {
             if canScroll {
@@ -2896,6 +2981,13 @@ open class Terminal {
                 j -= 1
                 resetBufferLine (y: j)
             }
+            if hasKittyPlacements {
+                // kitty clears the images on the screen, like a=d,d=a; virtual placements
+                // and image data stay, as a client that prints Unicode placeholders
+                // transmits once and prints them again after clearing (Claude Code
+                // redraws with ESC[2J ESC[3J ESC[H)
+                clearKittyPlacementsForEraseDisplay ()
+            }
             updateRange (0)
         case 3:
             // Clear scrollback (everything not in viewport)
@@ -2905,6 +2997,10 @@ open class Terminal {
                 buffer.linesTop = 0
                 buffer.yBase = max (buffer.yBase - scrollBackSize, 0)
                 buffer.yDisp = max (buffer.yDisp - scrollBackSize, 0)
+                if hasKittyPlacements {
+                    // placements in the removed lines go with them
+                    shiftKittyPlacementRows (by: -scrollBackSize)
+                }
             }
             informLineChangeInterval(0, rows - 1)
             break;
@@ -4157,6 +4253,7 @@ open class Terminal {
         var style = curAttr.style
         var fg = curAttr.fg
         var bg = curAttr.bg
+        var underlineColorIndex = curAttr.underlineColorIndex
         let def = CharData.defaultAttr
 
         var i = 0
@@ -4168,6 +4265,7 @@ open class Terminal {
                 style = def.style
                 fg = def.fg
                 bg = def.bg
+                underlineColorIndex = def.underlineColorIndex
             case 1:
                 // bold text
                 style = [style, .bold]
@@ -4295,13 +4393,36 @@ open class Terminal {
                 bg = CharData.defaultAttr.bg
                 
             case 58:
-                // TODO: set underline color
-                ()
-                
+                // underline colour, which kitty placeholders use for the placement id;
+                // its sub-parameters are consumed like those of 38 and 48, as running
+                // them as SGRs would apply 2 (dim) and 0 (reset) from 58;2;0;0;7
+                if i+1 < parCount {
+                    switch pars [i+1] {
+                    case 2: // RGB color
+                        if i+4 < parCount {
+                            underlineColorIndex = underlineColors.intern (Attribute.Color.trueColor(
+                                red:   UInt8(min (255, pars [i+2])),
+                                green: UInt8(min (255, pars [i+3])),
+                                blue:  UInt8(min (255, pars [i+4]))))
+                        }
+                        i += 4
+
+                    case 5: // indexed color
+                        if i+2 < parCount {
+                            underlineColorIndex = underlineColors.intern (Attribute.Color.ansi256(code: UInt8 (min (255, pars [i+2]))))
+                            i += 1
+                        }
+                        i += 1
+
+                    default:
+                        break
+                    }
+                }
+
             case 59:
-                // TODO: default underline color
-                ()
-                
+                // default underline color
+                underlineColorIndex = def.underlineColorIndex
+
             case 90...97:
                 // fg color 16
                 p += 8
@@ -4315,7 +4436,7 @@ open class Terminal {
             }
             i += 1
         }
-        curAttr = Attribute(fg: fg, bg: bg, style: style)
+        curAttr = Attribute(fg: fg, bg: bg, style: style, underlineColorIndex: underlineColorIndex)
     }
 
     //
@@ -5022,6 +5143,11 @@ open class Terminal {
             let last = buffer.lines [row]
             last.fill (with: CharData (attribute: da), atCol: buffer.marginLeft, len: columnCount)
         }
+        if hasKittyPlacements {
+            // the text moved within the margins whether or not margin mode is on
+            scrollKittyPlacementsInMargins (top: row, bottom: buffer.scrollBottom + buffer.yBase,
+                                            left: buffer.marginLeft, right: buffer.marginRight, delta: p)
+        }
         // this.maxRange();
         updateRange (buffer.scrollTop)
         updateRange (buffer.scrollBottom)
@@ -5059,6 +5185,12 @@ open class Terminal {
                                      items: [buffer.getBlankLine (attribute: da)],
                                      change: updateLine)
             }
+        }
+        if hasKittyPlacements {
+            scrollKittyPlacementsInMargins (top: buffer.yBase + buffer.scrollTop, bottom: buffer.yBase + buffer.scrollBottom,
+                                            left: marginMode ? buffer.marginLeft : 0,
+                                            right: marginMode ? buffer.marginRight : cols - 1,
+                                            delta: -p)
         }
         // this.maxRange();
         updateRange (buffer.scrollTop)
@@ -5436,6 +5568,13 @@ open class Terminal {
         options.cols = cols
         let savedCursorHidden = cursorHidden
         setup (isReset: true)
+        // kitty images and placements on both screens go with the reset, as does a
+        // transmission still arriving, which would otherwise continue into the next stream
+        abandonKittyGraphicsTransmission ()
+        clearAllKittyImages ()
+        // the normal buffer was replaced and the alternate one is cleared before it
+        // shows again, so no visible cell refers to an underline colour any more
+        underlineColors.reset ()
         cursorHidden = savedCursorHidden
         refresh (startRow: 0, endRow: rows-1)
         syncScrollArea ()
@@ -5469,6 +5608,12 @@ open class Terminal {
             buffer.clear()
             buffer.yBase = 0
             buffer.fillViewportRows()
+            // %output stops until the captures are in, so a kitty transmission or apc
+            // in progress cannot complete, and the placements anchored to the cleared
+            // lines would float over the replayed text; virtual placements and image
+            // data stay for the placeholders the replay brings back
+            abandonKittyGraphicsTransmission ()
+            clearKittyPlacementsForCaptureReplay ()
             tmuxCaptureRemaining = 3
             tmuxCaptureNeedsClear = true
 #if DEBUG
@@ -5768,9 +5913,18 @@ open class Terminal {
         let topRow = buffer.yBase + buffer.scrollTop
         let bottomRow = buffer.yBase + buffer.scrollBottom
 
+        // how this scroll renumbers buffer.lines, which kitty placements are anchored to
+        enum KittyRowEffect {
+            case none
+            case inPlace (left: Int, right: Int)
+            case shift (from: Int, through: Int, by: Int)
+        }
+        var kittyRowEffect = KittyRowEffect.none
+
         if hasHorizontalMargins {
             // scroll within margins only, preserving content outside (for tmux split panes)
             scrollWithinHorizontalMargins(up: true, topRow: topRow, bottomRow: bottomRow, fillData: newLine[0])
+            kittyRowEffect = .inPlace (left: buffer.marginLeft, right: buffer.marginRight)
         } else if buffer.scrollTop == 0 {
             // Determine whether the buffer is going to be trimmed after insertion.
             let willBufferBeTrimmed = buffer.lines.isFull
@@ -5779,6 +5933,8 @@ open class Terminal {
             if bottomRow == buffer.lines.count - 1 {
                 if willBufferBeTrimmed {
                     buffer.lines.recycle ()
+                    // the oldest line is gone, every index moves up one
+                    kittyRowEffect = .shift (from: Int.min, through: Int.max, by: -1)
                 } else {
                     buffer.lines.push (BufferLine (from: newLine))
                 }
@@ -5786,6 +5942,12 @@ open class Terminal {
                 buffer.lines.splice (start: bottomRow + 1, deleteCount: 0,
                                      items: [BufferLine (from: newLine)],
                                      change: updateLine)
+                // a line inserted below the region pushes the lines under it down one,
+                // unless the list is full, when the oldest line drops and the lines
+                // down to the region's bottom move up one instead
+                kittyRowEffect = willBufferBeTrimmed
+                    ? .shift (from: Int.min, through: bottomRow, by: -1)
+                    : .shift (from: bottomRow + 1, through: Int.max, by: 1)
             }
 
             // Only adjust ybase and ydisp when the buffer is not trimmed
@@ -5814,12 +5976,24 @@ open class Terminal {
                 buffer.lines.shiftElements (start: topRow + 1, count: scrollRegionHeight - 1, offset: -1)
             }
             buffer.lines [bottomRow] = BufferLine (from: newLine)
+            kittyRowEffect = .inPlace (left: 0, right: cols - 1)
         }
 
         // Move the viewport to the bottom of the buffer unless the user is
         // scrolling.
         if !userScrolling {
             buffer.yDisp = buffer.yBase
+        }
+
+        if hasKittyPlacements {
+            switch kittyRowEffect {
+            case .none:
+                break
+            case .inPlace (let left, let right):
+                scrollKittyPlacementsInMargins (top: topRow, bottom: bottomRow, left: left, right: right, delta: -1)
+            case .shift (let from, let through, let delta):
+                shiftKittyPlacementRows (from: from, through: through, by: delta)
+            }
         }
 
         //buffer.dump ()
@@ -6145,6 +6319,12 @@ open class Terminal {
                 }
                 buffer.lines [topRow] = buffer.getBlankLine (attribute: eraseAttr ())
             }
+            if hasKittyPlacements {
+                scrollKittyPlacementsInMargins (top: topRow, bottom: bottomRow,
+                                                left: hasHorizontalMargins ? buffer.marginLeft : 0,
+                                                right: hasHorizontalMargins ? buffer.marginRight : cols - 1,
+                                                delta: 1)
+            }
             updateRange (buffer.scrollTop)
             updateRange (buffer.scrollBottom)
             informLineChangeInterval(buffer.scrollTop, buffer.scrollBottom)
@@ -6254,7 +6434,21 @@ public extension TerminalDelegate {
         // no special handling
         return nil
     }
-    
+
+    func cellSizeInPixels(source: Terminal) -> (width: Int, height: Int)? {
+        // unknown
+        return nil
+    }
+
+    func exactCellSizeInPixels(source: Terminal) -> (width: Double, height: Double)? {
+        // the rounded size
+        return nil
+    }
+
+    func kittyAnimationTimerRequested(source: Terminal, deadlineUptimeNanoseconds: UInt64, serial: UInt64) {
+        // nothing
+    }
+
     func sizeChanged(source: Terminal) {
         // nothing
     }

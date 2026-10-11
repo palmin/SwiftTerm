@@ -346,6 +346,8 @@ class Buffer {
                     yBase = max (yBase - amountToTrim, 0)
                     yDisp = max (yDisp - amountToTrim, 0)
                     savedY = max (savedY - amountToTrim, 0)
+                    // kitty placements are anchored to line indices, which moved up
+                    terminal?.shiftKittyPlacementRows (in: self, by: -amountToTrim)
                 }
 
                 lines.maxLength = newMaxLength
@@ -373,7 +375,14 @@ class Buffer {
         }
         
         if isReflowEnabled {
+            // reflow (which only runs when the column count changes) inserts, joins and
+            // pops lines around the ones it keeps, so kitty placements follow the line
+            // they sit on to its new index
+            let kittyLines = cols != newCols ? terminal?.kittyLinesBeforeReflow (in: self) : nil
             reflow (newCols, newRows)
+            if let kittyLines {
+                terminal?.reanchorKittyPlacements (in: self, oldLines: kittyLines)
+            }
             // Trim the end of the line off if cols shrunk
             if cols > newCols {
                 for i in 0..<lines.maxLength {
