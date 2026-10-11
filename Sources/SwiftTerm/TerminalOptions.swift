@@ -19,6 +19,28 @@ public enum CursorStyle {
     case steadyBar
 }
 
+/// Configuration for the kitty graphics protocol, which is enabled unless the
+/// storage limit is zero.
+///
+/// Only direct (`t=d`) transmission is accepted. The client runs on the remote
+/// host, so the file, temporary file or shared memory name in a `t=f`, `t=t` or
+/// `t=s` transmission names something on that host; those are always refused
+/// and nothing local is read or deleted.
+public struct KittyGraphicsConfiguration: Sendable, Equatable {
+    /// The default per-screen limit, 64 MB of decoded RGBA, which holds a few
+    /// full-screen Retina screenshots
+    public static let defaultStorageLimitBytesPerScreen: UInt32 = 64 << 20
+
+    /// Maximum decoded bytes stored on each screen; the primary and alternate
+    /// screens have separate budgets. Zero disables the protocol, including
+    /// query replies.
+    public var storageLimitBytesPerScreen: UInt32
+
+    public init(storageLimitBytesPerScreen: UInt32 = KittyGraphicsConfiguration.defaultStorageLimitBytesPerScreen) {
+        self.storageLimitBytesPerScreen = storageLimitBytesPerScreen
+    }
+}
+
 /// Configuration options for the terminal at startup, these values are only read at startup
 public struct TerminalOptions {
     /// Desired number of columns at startup (default 80)
@@ -42,6 +64,8 @@ public struct TerminalOptions {
     /// to recognise the terminal and enable features for it.  Defaults to nil,
     /// which leaves the query unanswered.
     public var xtversion: String?
+    /// Kitty graphics protocol storage limit per screen, enabled by default
+    public var kittyGraphics: KittyGraphicsConfiguration
 
     /// Default options
     public static let `default` = TerminalOptions.init(cols: 80,
@@ -52,9 +76,10 @@ public struct TerminalOptions {
                                                        screenReaderMode: false,
                                                        scrollback: 500,
                                                        tabStopWidth: 8,
-                                                       xtversion: nil)
+                                                       xtversion: nil,
+                                                       kittyGraphics: KittyGraphicsConfiguration())
 
-  public init(cols: Int = Self.default.cols, rows: Int = Self.default.rows, convertEol: Bool = Self.default.convertEol, termName: String = Self.default.termName, cursorStyle: CursorStyle = Self.default.cursorStyle, screenReaderMode: Bool = Self.default.screenReaderMode, scrollback: Int = Self.default.scrollback, tabStopWidth: Int = Self.default.tabStopWidth, xtversion: String? = Self.default.xtversion) {
+  public init(cols: Int = Self.default.cols, rows: Int = Self.default.rows, convertEol: Bool = Self.default.convertEol, termName: String = Self.default.termName, cursorStyle: CursorStyle = Self.default.cursorStyle, screenReaderMode: Bool = Self.default.screenReaderMode, scrollback: Int = Self.default.scrollback, tabStopWidth: Int = Self.default.tabStopWidth, xtversion: String? = Self.default.xtversion, kittyGraphics: KittyGraphicsConfiguration = Self.default.kittyGraphics) {
         self.cols = cols
         self.rows = rows
         self.convertEol = convertEol
@@ -64,5 +89,6 @@ public struct TerminalOptions {
         self.scrollback = scrollback
         self.tabStopWidth = tabStopWidth
         self.xtversion = xtversion
+        self.kittyGraphics = kittyGraphics
     }
 }
