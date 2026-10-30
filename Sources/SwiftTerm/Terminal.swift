@@ -6182,29 +6182,31 @@ open class Terminal {
      * - Parameter shift: `true` if the shift key is pressed
      * - Parameter meta: `true` if the meta/alt key is pressed
      * - Parameter control: `true` if the control key is pressed
-     * - Returns: the encoded value
+     * - Returns: the encoded value for `sendEvent` or `sendMotion`. A release keeps
+     * the button and carries a marker they remove, so SGR can report which button
+     * was released
      */
     public func encodeButton (button: Int, release: Bool, shift: Bool, meta: Bool, control: Bool) -> Int
     {
         var value: Int
 
+        switch (button) {
+        case 0:
+            value = 0
+        case 1:
+            value = 1
+        case 2:
+            value = 2
+        case 4:
+            value = 64
+        case 5:
+            value = 65
+        default:
+            // a release of no button is how motion with no button held is encoded
+            value = release ? 3 : 0
+        }
         if release {
-            value = 3
-        } else {
-            switch (button) {
-            case 0:
-                value = 0
-            case 1:
-                value = 1
-            case 2:
-                value = 2
-            case 4:
-                value = 64
-            case 5:
-                value = 65
-            default:
-                value = 0
-            }
+            value |= Terminal.mouseReleaseMarker
         }
         if mouseMode.sendsModifiers() {
             if shift {
@@ -6219,7 +6221,14 @@ open class Terminal {
         }
         return value
     }
-    
+
+    // never sent, it tells sendEvent that a value from encodeButton is a release.
+    // SGR reports the released button the way xterm does, and tmux 3.5 and 3.6
+    // need that: a click whose release says button 3 matches no MouseUp key and
+    // is dropped before the pane sees it. the legacy encodings cannot name the
+    // button and send 3
+    private static let mouseReleaseMarker = 1 << 16
+
     /**
      * Sends a mouse event for a specific button at the specific location
      * - Parameter buttonFlags: Button flags encoded in Cb mode.
@@ -6235,8 +6244,17 @@ open class Terminal {
         // the pointer is dragged out of the window
         let x = min(max(0, x), max(0, cols - 1))
         let y = min(max(0, y), max(0, rows - 1))
+
+        // flags that did not come from encodeButton are read the legacy way,
+        // where button 3 means released
+        let marked = (buttonFlags & Terminal.mouseReleaseMarker) != 0
+        var buttonFlags = buttonFlags & ~Terminal.mouseReleaseMarker
+        let isRelease = (buttonFlags & 32) == 0 && (marked || (buttonFlags & 3) == 3)
+        if marked && mouseProtocol != .sgr {
+            buttonFlags = (buttonFlags & ~(3 | 64 | 128)) | 3
+        }
 #if DEBUG
-        NSLog("sendEvent: buttonFlags=\(buttonFlags), x=\(x), y=\(y), protocol=\(mouseProtocol)")
+        NSLog("sendEvent: buttonFlags=\(buttonFlags), release=\(isRelease), x=\(x), y=\(y), protocol=\(mouseProtocol)")
 #endif
 
         //print ("got \(mouseProtocol)")
@@ -6245,7 +6263,6 @@ open class Terminal {
             sendResponse(cc.CSI, "M", [UInt8(buttonFlags+32), min (UInt8(255), UInt8(32 + x+1)),
                                        min (UInt8(255), UInt8(32+y+1))])
         case .sgr:
-            let isRelease = (buttonFlags & 3) == 3 && (buttonFlags & 32) == 0
             let finalChar = isRelease ? "m" : "M"
             sendResponse(cc.CSI, "<\(buttonFlags);\(x + 1);\(y + 1)\(finalChar)")
         case .urxvt:
