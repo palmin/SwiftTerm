@@ -388,6 +388,10 @@ open class Terminal {
         let alt = buffers?.isAlternateBuffer ?? false
         return (alt ? kittyKeyboardStackAlt : kittyKeyboardStackMain).last ?? 0
     }
+
+    /// xterm modifyOtherKeys level set through XTMODKEYS (CSI > 4 ; Pv m), 0 when off.
+    /// tmux asks for it to tell keys such as Ctrl+Enter from their legacy bytes
+    public private(set) var modifyOtherKeys: Int = 0
     
     // You can ignore most of the defaults set here, the function
     // reset() will do that again
@@ -738,6 +742,7 @@ open class Terminal {
         pendingDesktopNotifications = [:]
         kittyKeyboardStackMain = [0]
         kittyKeyboardStackAlt = [0]
+        modifyOtherKeys = 0
 
         // charset'
         charset = nil
@@ -3950,6 +3955,7 @@ open class Terminal {
         wraparound = true  // defaults: xterm - true, vt100 - false
         kittyKeyboardStackMain = [0]
         kittyKeyboardStackAlt = [0]
+        modifyOtherKeys = 0
         applicationKeypad = false
         syncScrollArea ()
         applicationCursor = false
@@ -4014,6 +4020,7 @@ open class Terminal {
         print("--- keyboard ---")
         print("conformance: \(conformance)")
         print("kittyKeyboardFlags: \(kittyKeyboardFlags) (main stack: \(kittyKeyboardStackMain), alt stack: \(kittyKeyboardStackAlt))")
+        print("modifyOtherKeys: \(modifyOtherKeys)")
 
         print("--- charset ---")
         print("gLevel: \(gLevel), gcharset: \(gcharset), charset: \(charset?.description ?? "nil")")
@@ -4167,6 +4174,18 @@ open class Terminal {
         }
     }
 
+    // XTMODKEYS, CSI > Pp ; Pv m. only resource 4, modifyOtherKeys, is kept,
+    // and a missing value resets it the way xterm does. tmux sends
+    // CSI > 4 ; 2 m when it attaches to a terminal with the extkeys feature
+    // and CSI > 4 m when it leaves
+    func cmdSetModifyKeys (_ pars: [Int])
+    {
+        guard pars.first == 4 else {
+            return
+        }
+        modifyOtherKeys = pars.count > 1 ? max (0, pars [1]) : 0
+    }
+
     //
     // CSI Pm m  Character Attributes (SGR).
     //     Ps = 0  -> Normal (default).
@@ -4240,6 +4259,9 @@ open class Terminal {
         // not SGR; applying those as attributes turns key-modifier probes into
         // stray underline/color state
         if collect != [] {
+            if collect == [UInt8 (ascii: ">")] {
+                cmdSetModifyKeys (pars)
+            }
             return
         }
         // Optimize a single SGR0.
